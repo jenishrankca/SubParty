@@ -53,6 +53,8 @@ class JobResponse(BaseModel):
     current_time: float
     playhead: float = 0.0
     live_lag: float = 0.0
+    sample_interval: float = 1.0
+    buffer_ahead: float = 0.0
     error: str | None = None
     cues: list[dict[str, Any]] = []
 
@@ -88,9 +90,8 @@ def start_job(body: StartJobRequest) -> JobResponse:
             fps=body.fps,
             band_ratio=body.band_ratio,
             lookahead=body.lookahead,
+            playhead=body.playhead,
         )
-        if body.playhead > 0:
-            jobs.set_playhead(job.id, body.playhead)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -188,6 +189,8 @@ def _to_response(job: Any) -> JobResponse:
         current_time=job.current_time,
         playhead=job.playhead,
         live_lag=job.live_lag,
+        sample_interval=job.sample_interval,
+        buffer_ahead=job.buffer_ahead,
         error=job.error,
         cues=list(job.cues),
     )

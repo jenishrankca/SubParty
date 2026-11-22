@@ -35,6 +35,8 @@ export function App() {
   const [engineOk, setEngineOk] = useState<boolean | null>(null);
   const [avgSlotMs, setAvgSlotMs] = useState<number | null>(null);
   const [liveLag, setLiveLag] = useState<number | null>(null);
+  const [bufferAhead, setBufferAhead] = useState<number | null>(null);
+  const [sampleInterval, setSampleInterval] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const jobIdRef = useRef<string | null>(null);
@@ -123,6 +125,8 @@ export function App() {
     setPlayTime(0);
     setAvgSlotMs(null);
     setLiveLag(null);
+    setBufferAhead(null);
+    setSampleInterval(null);
   }
 
   async function startProcess() {
@@ -204,6 +208,8 @@ export function App() {
           if (typeof data.duration === "number") setDuration(data.duration);
           if (typeof data.avg_slot_ms === "number") setAvgSlotMs(data.avg_slot_ms);
           if (typeof data.live_lag === "number") setLiveLag(data.live_lag);
+          if (typeof data.buffer_ahead === "number") setBufferAhead(data.buffer_ahead);
+          if (typeof data.sample_interval === "number") setSampleInterval(data.sample_interval);
           setStatus("running");
         } else if (type === "status" || type === "done" || type === "error") {
           if (typeof data.status === "string") setStatus(data.status as JobStatus);
@@ -348,6 +354,16 @@ export function App() {
                 Slot: <strong>{avgSlotMs} ms avg</strong>
               </div>
             ) : null}
+            {sampleInterval != null && status === "running" ? (
+              <div>
+                Sample: <strong>every {sampleInterval.toFixed(1)}s</strong>
+              </div>
+            ) : null}
+            {bufferAhead != null && status === "running" ? (
+              <div>
+                Buffer ahead: <strong>{bufferAhead.toFixed(1)}s</strong>
+              </div>
+            ) : null}
             {liveLag != null && status === "running" ? (
               <div>
                 Live lag: <strong>{liveLag.toFixed(1)}s</strong>
@@ -372,7 +388,7 @@ export function App() {
             {error
               ? error
               : status === "running"
-                ? "Playhead-priority OCR — English appears near current time; SRT fills in background."
+                ? "Adaptive live OCR — samples follow the playhead; skips backlog when lagging; SRT fills when ahead."
                 : status === "done"
                   ? "Done. .en.srt is beside the video for VLC / YouTube."
                   : "Free local stack: ffmpeg → RapidOCR (zh) → Argos ZH→EN."}

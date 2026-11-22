@@ -48,6 +48,8 @@ def _translate_cached(text: str) -> str:
 def warm_translate() -> None:
     try:
         _ensure_package()
+        # Force-load SBD / CTranslate2 once so first live cue isn't a multi-second stall
+        _translate_cached("你好")
     except Exception as exc:
         logger.warning("translate warm failed: %s", exc)
 
