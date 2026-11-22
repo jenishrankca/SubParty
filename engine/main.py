@@ -15,12 +15,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ffmpeg_util import ffmpeg_path, ffprobe_path
+from glossary import glossary_for_video, invalidate_glossary_cache, load_glossary, series_id_from_video
 from pipeline import jobs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("subparty.api")
 
-app = FastAPI(title="SubParty Engine", version="0.2.0")
+app = FastAPI(title="SubParty Engine", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,6 +43,12 @@ class PlayheadRequest(BaseModel):
     t: float = Field(..., ge=0.0)
 
 
+class GlossaryTermRequest(BaseModel):
+    video_path: str = Field(..., min_length=1)
+    zh: str = Field(..., min_length=1)
+    en: str = Field(..., min_length=1)
+
+
 class JobResponse(BaseModel):
     id: str
     video_path: str
@@ -55,6 +62,8 @@ class JobResponse(BaseModel):
     live_lag: float = 0.0
     sample_interval: float = 1.0
     buffer_ahead: float = 0.0
+    series_id: str = ""
+    region: dict[str, float] = {}
     error: str | None = None
     cues: list[dict[str, Any]] = []
 
@@ -77,8 +86,8 @@ def health() -> dict[str, Any]:
         "ffmpeg": ffmpeg_ok,
         "ffprobe": ffprobe_ok,
         "error": ffmpeg_err,
-        "version": "0.2.0",
-        "mode": "playhead-priority",
+        "version": "0.3.0",
+        "mode": "playhead-priority+context+region+glossary",
     }
 
 
@@ -124,6 +133,25 @@ def cancel_job(job_id: str) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.get("/glossary")
+def get_glossary(video_path: str) -> dict[str, Any]:
+    if not Path(video_path).exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+    g = load_glossary(video_path)
+    return g.as_dict()
+
+
+@app.post("/glossary/term")
+def put_glossary_term(body: GlossaryTermRequest) -> dict[str, Any]:
+    if not Path(body.video_path).exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+    sid = series_id_from_video(body.video_path)
+    invalidate_glossary_cache(sid)
+    g = glossary_for_video(body.video_path)
+    g.remember(body.zh.strip(), body.en.strip(), persist=True)
+    return g.as_dict()
+
+
 @app.get("/jobs/{job_id}/events")
 async def job_events(job_id: str) -> StreamingResponse:
     job = jobs.get(job_id)
@@ -139,6 +167,8 @@ async def job_events(job_id: str) -> StreamingResponse:
 
     for cue in list(job.cues):
         q.put({"type": "cue", "cue": cue, "cue_count": job.cue_count, "srt_path": job.srt_path})
+    if job.region:
+        q.put({"type": "region", "region": job.region, "series_id": job.series_id})
     q.put(
         {
             "type": "status",
@@ -147,6 +177,8 @@ async def job_events(job_id: str) -> StreamingResponse:
             "cue_count": job.cue_count,
             "error": job.error,
             "srt_path": job.srt_path,
+            "series_id": job.series_id,
+            "region": job.region,
         }
     )
     if job.status in {"done", "error", "cancelled"}:
@@ -191,6 +223,8 @@ def _to_response(job: Any) -> JobResponse:
         live_lag=job.live_lag,
         sample_interval=job.sample_interval,
         buffer_ahead=job.buffer_ahead,
+        series_id=job.series_id,
+        region=dict(job.region or {}),
         error=job.error,
         cues=list(job.cues),
     )

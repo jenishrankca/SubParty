@@ -11,11 +11,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from ffmpeg_util import extract_subtitle_band, probe_duration, probe_size
+from context_translate import DialogueContext
+from ffmpeg_util import extract_region, probe_duration, probe_size
+from glossary import glossary_for_video
 from ocr import ocr_lines, warm_ocr
+from region import SubtitleRegion, default_bottom_region, detect_subtitle_region
 from srt_writer import Cue, SrtWriter
 from text_filters import filter_ocr_lines
-from translate import translate_zh_to_en, warm_translate
+from translate import warm_translate
 
 logger = logging.getLogger("subparty.pipeline")
 
@@ -43,6 +46,8 @@ class JobState:
     live_lag: float = 0.0
     sample_interval: float = 1.0
     buffer_ahead: float = 0.0
+    series_id: str = ""
+    region: dict[str, float] = field(default_factory=dict)
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _playhead_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _seek_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -141,6 +146,39 @@ class JobManager:
             job.duration = duration
             writer = SrtWriter(Path(job.srt_path))
 
+            gloss = glossary_for_video(str(video))
+            job.series_id = gloss.series_id
+            dial_ctx = DialogueContext(window=4, glossary=gloss)
+
+            # Auto subtitle region (anywhere); fall back to bottom band
+            try:
+                with job._playhead_lock:
+                    ph0 = job.playhead
+                sample_t = [
+                    max(0.5, ph0),
+                    max(0.5, ph0 + 4),
+                    max(0.5, ph0 + 12),
+                    max(0.5, min(duration - 1, ph0 + 30) if duration > 2 else ph0 + 2),
+                ]
+                region = detect_subtitle_region(video, sample_times=sample_t, duration=duration)
+            except Exception as exc:
+                logger.warning("region detect failed: %s", exc)
+                region = default_bottom_region()
+                # legacy band_ratio override
+                region = SubtitleRegion(
+                    x=0.06, y=1.0 - band_ratio, w=0.88, h=band_ratio
+                ).clamp()
+            job.region = {"x": region.x, "y": region.y, "w": region.w, "h": region.h}
+            self._emit(
+                job,
+                {
+                    "type": "region",
+                    "region": job.region,
+                    "series_id": job.series_id,
+                    "glossary_terms": len(gloss.terms),
+                },
+            )
+
             # Quantized sample grid uses a *base* tick; adaptive stride skips ticks when lagging
             base_tick = 0.5  # fine grid; we jump by adaptive stride
             n_ticks = max(1, int(duration / base_tick) + 1)
@@ -206,14 +244,16 @@ class JobManager:
                     frame_path = tmp_dir / f"frame_{tick:07d}.png"
                     t0 = time.perf_counter()
                     try:
-                        extract_subtitle_band(
+                        extract_region(
                             video,
                             t,
                             frame_path,
-                            band_ratio=band_ratio,
+                            x_ratio=region.x,
+                            y_ratio=region.y,
+                            w_ratio=region.w,
+                            h_ratio=region.h,
                             height=frame_h,
                             width=frame_w,
-                            side_inset_ratio=0.08,
                             scale_width=640,
                         )
                         zh = filter_ocr_lines(ocr_lines(str(frame_path)))
@@ -261,6 +301,7 @@ class JobManager:
                         duration,
                         emitted_runs,
                         cue_serial,
+                        dial_ctx,
                     )
 
                     # Buffer ahead / lag relative to playhead
@@ -291,6 +332,8 @@ class JobManager:
                             "avg_slot_ms": round(avg_ms),
                             "ticks_done": len(done),
                             "ticks_total": n_ticks,
+                            "series_id": job.series_id,
+                            "region": job.region,
                         },
                     )
 
@@ -331,6 +374,7 @@ class JobManager:
         duration: float,
         emitted_runs: set[tuple[int, int, str]],
         serial: int,
+        dial_ctx: DialogueContext,
     ) -> int:
         if not done:
             return serial
@@ -354,7 +398,8 @@ class JobManager:
             if key not in emitted_runs:
                 start = s0 * interval
                 end = min(duration, (s1 + 1) * interval)
-                serial = self._flush_cue(job, writer, serial, start, end, zh)
+                upcoming = _upcoming_zh(slot_text, done, s1, limit=2)
+                serial = self._flush_cue(job, writer, serial, start, end, zh, dial_ctx, upcoming)
                 emitted_runs.add(key)
             i = j
         return serial
@@ -367,10 +412,12 @@ class JobManager:
         start: float,
         end: float,
         zh: str,
+        dial_ctx: DialogueContext,
+        upcoming: list[str] | None = None,
     ) -> int:
         serial += 1
         try:
-            en = translate_zh_to_en(zh) or zh
+            en = dial_ctx.translate(zh, upcoming=upcoming) or zh
         except Exception as exc:
             logger.warning("translate failed, keeping ZH: %s", exc)
             en = zh
@@ -464,6 +511,29 @@ def _pick_next_tick(
                 return s
 
     return None
+
+
+def _upcoming_zh(
+    slot_text: dict[int, str],
+    done: set[int],
+    after_slot: int,
+    *,
+    limit: int = 2,
+) -> list[str]:
+    """Next distinct non-empty ZH lines already sampled after the current run."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in sorted(done):
+        if s <= after_slot:
+            continue
+        zh = (slot_text.get(s) or "").strip()
+        if not zh or zh in seen:
+            continue
+        seen.add(zh)
+        out.append(zh)
+        if len(out) >= limit:
+            break
+    return out
 
 
 jobs = JobManager()
