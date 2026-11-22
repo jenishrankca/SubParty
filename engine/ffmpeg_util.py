@@ -87,6 +87,51 @@ def probe_size(video_path: Path) -> tuple[int, int]:
     return width, height
 
 
+def extract_full_frame(
+    video_path: Path,
+    timestamp: float,
+    out_path: Path,
+    scale_width: int = 640,
+) -> None:
+    """Grab one full frame (scaled) for region detection."""
+    sw = max(320, int(scale_width))
+    vf = f"scale={sw}:-1"
+    _run_ffmpeg_frame(video_path, timestamp, out_path, vf)
+
+
+def extract_region(
+    video_path: Path,
+    timestamp: float,
+    out_path: Path,
+    *,
+    x_ratio: float,
+    y_ratio: float,
+    w_ratio: float,
+    h_ratio: float,
+    height: int | None = None,
+    width: int | None = None,
+    scale_width: int = 640,
+) -> None:
+    """Crop a normalized region of the frame for OCR."""
+    if height is None or width is None:
+        probed_w, probed_h = probe_size(video_path)
+        if width is None:
+            width = probed_w
+        if height is None:
+            height = probed_h
+    x = max(0, int(width * max(0.0, min(0.95, x_ratio))))
+    y = max(0, int(height * max(0.0, min(0.95, y_ratio))))
+    crop_w = max(64, int(width * max(0.1, min(1.0, w_ratio))))
+    crop_h = max(32, int(height * max(0.05, min(1.0, h_ratio))))
+    if x + crop_w > width:
+        crop_w = max(64, width - x)
+    if y + crop_h > height:
+        crop_h = max(32, height - y)
+    sw = max(320, int(scale_width))
+    vf = f"crop={crop_w}:{crop_h}:{x}:{y},scale={sw}:-1"
+    _run_ffmpeg_frame(video_path, timestamp, out_path, vf)
+
+
 def extract_subtitle_band(
     video_path: Path,
     timestamp: float,
@@ -97,21 +142,23 @@ def extract_subtitle_band(
     side_inset_ratio: float = 0.0,
     scale_width: int = 720,
 ) -> None:
-    """Grab one frame and crop the bottom subtitle band (optional side inset)."""
-    if height is None or width is None:
-        probed_w, probed_h = probe_size(video_path)
-        if width is None:
-            width = probed_w
-        if height is None:
-            height = probed_h
-    band_h = max(32, int(height * band_ratio))
-    y = max(0, height - band_h)
+    """Grab one frame and crop the bottom subtitle band (legacy helper)."""
     inset = max(0.0, min(0.2, side_inset_ratio))
-    x = int(width * inset)
-    crop_w = max(64, int(width * (1.0 - 2 * inset)))
-    sw = max(320, int(scale_width))
-    # Input seek before -i for speed; smaller scale for faster OCR
-    vf = f"crop={crop_w}:{band_h}:{x}:{y},scale={sw}:-1"
+    extract_region(
+        video_path,
+        timestamp,
+        out_path,
+        x_ratio=inset,
+        y_ratio=1.0 - band_ratio,
+        w_ratio=1.0 - 2 * inset,
+        h_ratio=band_ratio,
+        height=height,
+        width=width,
+        scale_width=scale_width,
+    )
+
+
+def _run_ffmpeg_frame(video_path: Path, timestamp: float, out_path: Path, vf: str) -> None:
     cmd = [
         str(ffmpeg_path()),
         "-hide_banner",
