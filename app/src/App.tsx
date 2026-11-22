@@ -37,6 +37,10 @@ export function App() {
   const [liveLag, setLiveLag] = useState<number | null>(null);
   const [bufferAhead, setBufferAhead] = useState<number | null>(null);
   const [sampleInterval, setSampleInterval] = useState<number | null>(null);
+  const [bilingual, setBilingual] = useState(true);
+  const [seriesId, setSeriesId] = useState<string | null>(null);
+  const [regionLabel, setRegionLabel] = useState<string | null>(null);
+  const [glossaryCount, setGlossaryCount] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const jobIdRef = useRef<string | null>(null);
@@ -127,6 +131,9 @@ export function App() {
     setLiveLag(null);
     setBufferAhead(null);
     setSampleInterval(null);
+    setSeriesId(null);
+    setRegionLabel(null);
+    setGlossaryCount(null);
   }
 
   async function startProcess() {
@@ -203,6 +210,13 @@ export function App() {
           });
           setCueCount(Number(data.cue_count ?? 0));
           if (typeof data.srt_path === "string") setSrtPath(data.srt_path);
+        } else if (type === "region") {
+          if (typeof data.series_id === "string") setSeriesId(data.series_id);
+          if (typeof data.glossary_terms === "number") setGlossaryCount(data.glossary_terms);
+          const region = data.region as { y?: number; h?: number } | undefined;
+          if (region && typeof region.y === "number" && typeof region.h === "number") {
+            setRegionLabel(`y ${(region.y * 100).toFixed(0)}–${((region.y + region.h) * 100).toFixed(0)}%`);
+          }
         } else if (type === "progress") {
           setProgress(Number(data.progress ?? 0));
           if (typeof data.duration === "number") setDuration(data.duration);
@@ -210,6 +224,7 @@ export function App() {
           if (typeof data.live_lag === "number") setLiveLag(data.live_lag);
           if (typeof data.buffer_ahead === "number") setBufferAhead(data.buffer_ahead);
           if (typeof data.sample_interval === "number") setSampleInterval(data.sample_interval);
+          if (typeof data.series_id === "string") setSeriesId(data.series_id);
           setStatus("running");
         } else if (type === "status" || type === "done" || type === "error") {
           if (typeof data.status === "string") setStatus(data.status as JobStatus);
@@ -217,6 +232,7 @@ export function App() {
           if (typeof data.cue_count === "number") setCueCount(data.cue_count);
           if (typeof data.error === "string") setError(data.error);
           if (typeof data.srt_path === "string") setSrtPath(data.srt_path);
+          if (typeof data.series_id === "string") setSeriesId(data.series_id);
         } else if (type === "end") {
           es.close();
         }
@@ -290,6 +306,14 @@ export function App() {
           >
             Open folder
           </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => setBilingual((v) => !v)}
+            title="Toggle Chinese + English overlay"
+          >
+            {bilingual ? "ZH+EN" : "EN only"}
+          </button>
         </div>
       </header>
 
@@ -305,8 +329,11 @@ export function App() {
                 onPause={() => setPlaying(false)}
                 onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
               />
-              <div className={`cue-overlay${activeCue ? " visible" : ""}`}>
-                {activeCue?.text_en || ""}
+              <div className={`cue-overlay${activeCue ? " visible" : ""}${bilingual ? " bilingual" : ""}`}>
+                {bilingual && activeCue?.text_zh ? (
+                  <div className="cue-zh">{activeCue.text_zh}</div>
+                ) : null}
+                <div className="cue-en">{activeCue?.text_en || ""}</div>
               </div>
               <div className="transport">
                 <button type="button" className="secondary" onClick={() => seekBy(-10)}>
@@ -367,6 +394,17 @@ export function App() {
             {liveLag != null && status === "running" ? (
               <div>
                 Live lag: <strong>{liveLag.toFixed(1)}s</strong>
+              </div>
+            ) : null}
+            {seriesId ? (
+              <div>
+                Series: <strong>{seriesId}</strong>
+                {glossaryCount != null ? ` · ${glossaryCount} terms` : ""}
+              </div>
+            ) : null}
+            {regionLabel ? (
+              <div>
+                Sub region: <strong>{regionLabel}</strong>
               </div>
             ) : null}
           </div>
