@@ -68,10 +68,12 @@ c:\Users\jenis\App\SubParty\scripts\start-engine.cmd
 ## Use
 
 1. **Pick video** (MP4 / MKV / TS with Chinese hardsubs)
-2. **Process** — frames sampled from the bottom subtitle band → OCR → ZH→EN
-3. Watch in the embedded player; English overlay updates as cues arrive
+2. **Process** — auto-detects the subtitle region → OCR → contextual ZH→EN (series glossary)
+3. Watch live; toggle **ZH+EN** / **EN only** on the overlay
 4. `{videoname}.en.srt` grows beside the video for VLC / YouTube
 5. **Open folder** to reveal the SRT
+
+Series glossary lives at `{video_folder}/.subparty/{series_id}.json` (folder name = series). APIs: `GET /glossary?video_path=…`, `POST /glossary/term`.
 
 Sample hardsub clip: `samples\demo_zh_hardsub.mp4`.
 
