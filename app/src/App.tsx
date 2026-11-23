@@ -162,8 +162,25 @@ export function App() {
   const [gEn, setGEn] = useState("");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [editCue, setEditCue] = useState<Cue | null>(null);
-  const [panel, setPanel] = useState<"job" | "glossary" | "timeline" | "models">("job");
+  const [panel, setPanel] = useState<"job" | "glossary" | "timeline" | "qa" | "batch" | "models">(
+    "job"
+  );
   const [batchNote, setBatchNote] = useState<string | null>(null);
+  const [batchId, setBatchId] = useState<string | null>(null);
+  const [batchStatus, setBatchStatus] = useState<{
+    total: number;
+    progress: number;
+    complete?: boolean;
+    by_status?: Record<string, number>;
+    jobs?: Array<Record<string, unknown>>;
+  } | null>(null);
+  const [qaReport, setQaReport] = useState<Record<string, unknown> | null>(null);
+  const [seriesList, setSeriesList] = useState<Array<{ series_id: string; term_count: number; path: string }>>(
+    []
+  );
+  const [nameSuggestions, setNameSuggestions] = useState<Array<{ zh: string; en: string; count: string }>>(
+    []
+  );
   const [recovery, setRecovery] = useState<Array<Record<string, unknown>>>([]);
   const [audioVerify, setAudioVerify] = useState(false);
   const [audioReady, setAudioReady] = useState<AudioVerifyStatus | null>(null);
@@ -343,8 +360,55 @@ export function App() {
       setRecovery(rec.jobs || []);
       const health = await apiGet<{ audio_verify?: AudioVerifyStatus }>("/health");
       if (health.audio_verify) setAudioReady(health.audio_verify);
+      const series = await apiGet<{ series: Array<{ series_id: string; term_count: number; path: string }> }>(
+        "/glossary/series"
+      );
+      setSeriesList(series.series || []);
     } catch {
       /* auth may not be ready yet */
+    }
+  }
+
+  async function refreshBatchStatus(id?: string | null) {
+    const bid = id ?? batchId;
+    if (!bid) return;
+    try {
+      const res = await apiGet<{
+        total: number;
+        progress: number;
+        complete?: boolean;
+        by_status?: Record<string, number>;
+        jobs?: Array<Record<string, unknown>>;
+      }>(`/jobs/batch/${bid}`);
+      setBatchStatus(res);
+    } catch (err) {
+      setError(formatApiError(err));
+    }
+  }
+
+  async function refreshQa() {
+    if (!jobId) return;
+    setBusy(true);
+    try {
+      const res = await apiGet<Record<string, unknown>>(`/jobs/${jobId}/qa`);
+      setQaReport(res);
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshNameSuggestions() {
+    if (!jobId && !videoPath) return;
+    try {
+      const q = jobId
+        ? `/glossary/suggest?job_id=${encodeURIComponent(jobId)}`
+        : `/glossary/suggest?video_path=${encodeURIComponent(videoPath || "")}`;
+      const res = await apiGet<{ suggestions: Array<{ zh: string; en: string; count: string }> }>(q);
+      setNameSuggestions(res.suggestions || []);
+    } catch {
+      /* optional */
     }
   }
 
@@ -382,7 +446,10 @@ export function App() {
         "POST",
         { video_paths: paths, engine_id: engineId, lookahead: 12, fps: 1 }
       );
+      setBatchId(res.batch_id);
       setBatchNote(`Batch ${res.batch_id.slice(0, 8)} · ${res.jobs.length} jobs`);
+      setPanel("batch");
+      void refreshBatchStatus(res.batch_id);
       const first = res.jobs.find((j) => j.id);
       if (first?.id) {
         setVideoPath(paths[0]);
@@ -940,12 +1007,17 @@ export function App() {
 
         <aside className="side">
           <div className="tabs">
-            {(["job", "glossary", "timeline", "models"] as const).map((p) => (
+            {(["job", "timeline", "qa", "glossary", "batch", "models"] as const).map((p) => (
               <button
                 key={p}
                 type="button"
                 className={panel === p ? "tab active" : "tab"}
-                onClick={() => setPanel(p)}
+                onClick={() => {
+                  setPanel(p);
+                  if (p === "qa") void refreshQa();
+                  if (p === "glossary") void refreshNameSuggestions();
+                  if (p === "batch") void refreshBatchStatus();
+                }}
               >
                 {p}
               </button>
@@ -1206,7 +1278,49 @@ export function App() {
                 <button type="button" onClick={() => void saveGlossaryTerm()} disabled={!videoPath}>
                   Add / edit
                 </button>
+                <button type="button" className="secondary" onClick={() => void refreshNameSuggestions()}>
+                  Suggest names
+                </button>
               </div>
+              {nameSuggestions.length ? (
+                <>
+                  <h2>Character suggestions</h2>
+                  <ul className="cue-list review">
+                    {nameSuggestions.slice(0, 16).map((s) => (
+                      <li key={s.zh}>
+                        <div className="en">
+                          {s.zh} · seen {s.count}×
+                        </div>
+                        <button
+                          type="button"
+                          className="linkish"
+                          onClick={() => {
+                            setGZh(s.zh);
+                            setGEn(s.en || "");
+                          }}
+                        >
+                          Use
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
+              {seriesList.length ? (
+                <>
+                  <h2>All series memory</h2>
+                  <ul className="cue-list">
+                    {seriesList.slice(0, 20).map((s) => (
+                      <li key={s.series_id}>
+                        <div className="en">
+                          {s.series_id} · {s.term_count} terms
+                        </div>
+                        <div className="t">{s.path}</div>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
               <ul className="cue-list">
                 {Object.entries(glossary?.terms || {}).map(([zh, en]) => (
                   <li key={zh}>
@@ -1222,11 +1336,209 @@ export function App() {
             </>
           ) : null}
 
+          {panel === "qa" ? (
+            <>
+              <h2>
+                Quality report
+                <button type="button" className="linkish" onClick={() => void refreshQa()} disabled={!jobId || busy}>
+                  Refresh
+                </button>
+              </h2>
+              {!jobId ? (
+                <div className="empty" style={{ padding: "0.5rem 0" }}>
+                  Process a job to score CER / timing / multimodal QA.
+                </div>
+              ) : qaReport ? (
+                <>
+                  <div className="meta compact">
+                    <div>
+                      <span>Cues</span>
+                      <strong>{String(qaReport.cue_count ?? "—")}</strong>
+                    </div>
+                    <div>
+                      <span>Uncertain</span>
+                      <strong>{String(qaReport.uncertain_count ?? "—")}</strong>
+                    </div>
+                    <div>
+                      <span>OCR CER</span>
+                      <strong>
+                        {(() => {
+                          const m = qaReport.metrics as { ocr_cer?: { mean_cer?: number } } | undefined;
+                          const v = m?.ocr_cer?.mean_cer;
+                          return typeof v === "number" ? v.toFixed(3) : "—";
+                        })()}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Start err</span>
+                      <strong>
+                        {(() => {
+                          const m = qaReport.metrics as { timing?: { mean_start_err_ms?: number } } | undefined;
+                          const v = m?.timing?.mean_start_err_ms;
+                          return typeof v === "number" ? `${Math.round(v)} ms` : "—";
+                        })()}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>RTF</span>
+                      <strong>
+                        {(() => {
+                          const m = qaReport.metrics as { rtf?: number } | undefined;
+                          return typeof m?.rtf === "number" ? m.rtf.toFixed(3) : "—";
+                        })()}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Audio disagree</span>
+                      <strong>
+                        {(() => {
+                          const mm = qaReport.multimodal as { disagreements?: number } | undefined;
+                          return String(mm?.disagreements ?? "—");
+                        })()}
+                      </strong>
+                    </div>
+                  </div>
+                  <h2>Review queue</h2>
+                  <ul className="cue-list review">
+                    {((qaReport.review_queue as Array<Record<string, unknown>>) || []).map((c, i) => (
+                      <li
+                        key={`q-${String(c.start)}-${i}`}
+                        className={c.audio_disagreement ? "audio-disagree-item" : "uncertain-item"}
+                      >
+                        <div className="t">
+                          #{String(c.index ?? i)} · {formatTime(Number(c.start || 0))}–{formatTime(Number(c.end || 0))}
+                          {c.maturity ? ` · ${String(c.maturity)}` : ""}
+                          <button
+                            type="button"
+                            className="linkish"
+                            onClick={() => {
+                              const v = videoRef.current;
+                              if (!v) return;
+                              v.currentTime = Number(c.start || 0);
+                              setPlayTime(Number(c.start || 0));
+                              setPanel("timeline");
+                              const match = cues.find(
+                                (x) => Math.abs(x.start - Number(c.start || 0)) < 0.08
+                              );
+                              if (match) setEditCue({ ...match });
+                            }}
+                          >
+                            Edit
+                          </button>
+                        </div>
+                        <div className="en">{String(c.text_en || "")}</div>
+                        <div className="zh">{String(c.text_zh || "")}</div>
+                        {c.audio_transcript ? <div className="t">ASR: {String(c.audio_transcript)}</div> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <div className="empty" style={{ padding: "0.5rem 0" }}>
+                  Click Refresh to build the QA report.
+                </div>
+              )}
+            </>
+          ) : null}
+
+          {panel === "batch" ? (
+            <>
+              <h2>
+                Batch production
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => void refreshBatchStatus()}
+                  disabled={!batchId || busy}
+                >
+                  Refresh
+                </button>
+              </h2>
+              {!batchId ? (
+                <div className="empty" style={{ padding: "0.5rem 0" }}>
+                  Use Batch in the top bar to queue multiple videos.
+                </div>
+              ) : (
+                <>
+                  <div className="meta compact">
+                    <div>
+                      <span>Batch</span>
+                      <strong>{batchId.slice(0, 8)}</strong>
+                    </div>
+                    <div>
+                      <span>Jobs</span>
+                      <strong>{batchStatus?.total ?? "…"}</strong>
+                    </div>
+                    <div>
+                      <span>Progress</span>
+                      <strong>
+                        {batchStatus ? `${Math.round((batchStatus.progress || 0) * 100)}%` : "…"}
+                        {batchStatus?.complete ? " · complete" : ""}
+                      </strong>
+                    </div>
+                  </div>
+                  {batchStatus?.by_status ? (
+                    <div className="t" style={{ marginBottom: "0.5rem", opacity: 0.85 }}>
+                      {Object.entries(batchStatus.by_status)
+                        .map(([k, v]) => `${k}: ${v}`)
+                        .join(" · ")}
+                    </div>
+                  ) : null}
+                  <ul className="cue-list">
+                    {(batchStatus?.jobs || []).map((j) => (
+                      <li key={String(j.id)}>
+                        <div className="t">
+                          {String(j.status)} · {String(j.id).slice(0, 8)}
+                          {typeof j.cue_count === "number" ? ` · ${j.cue_count} cues` : ""}
+                        </div>
+                        <div className="en">{String(j.video_path || "")}</div>
+                        {j.error ? <div className="zh">{String(j.error)}</div> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </>
+          ) : null}
+
           {panel === "timeline" ? (
             <>
-              <h2>Timeline editor</h2>
+              <h2>Production editor</h2>
               {editCue ? (
                 <div className="editor">
+                  <div className="t" style={{ marginBottom: "0.35rem" }}>
+                    Cue #{editCue.index}
+                    {editCue.maturity ? ` · ${editCue.maturity}` : ""}
+                    {editCue.audio_disagreement ? " · audio disagree" : ""}
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => {
+                        const idx = cues.findIndex(
+                          (c) =>
+                            (editCue.cue_id && c.cue_id === editCue.cue_id) ||
+                            Math.abs(c.start - editCue.start) < 0.05
+                        );
+                        if (idx > 0) setEditCue({ ...cues[idx - 1] });
+                      }}
+                    >
+                      Prev
+                    </button>
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => {
+                        const idx = cues.findIndex(
+                          (c) =>
+                            (editCue.cue_id && c.cue_id === editCue.cue_id) ||
+                            Math.abs(c.start - editCue.start) < 0.05
+                        );
+                        if (idx >= 0 && idx < cues.length - 1) setEditCue({ ...cues[idx + 1] });
+                      }}
+                    >
+                      Next
+                    </button>
+                  </div>
                   <label>
                     Start
                     <input
@@ -1246,7 +1558,7 @@ export function App() {
                     />
                   </label>
                   <label>
-                    ZH
+                    ZH (display)
                     <input
                       value={editCue.text_zh}
                       onChange={(e) => setEditCue({ ...editCue, text_zh: e.target.value })}
@@ -1259,6 +1571,15 @@ export function App() {
                       onChange={(e) => setEditCue({ ...editCue, text_en: e.target.value })}
                     />
                   </label>
+                  {editCue.original_ocr ? (
+                    <div className="zh">OCR: {editCue.original_ocr}</div>
+                  ) : null}
+                  {editCue.audio_transcript ? (
+                    <div className="t">ASR: {editCue.audio_transcript}</div>
+                  ) : null}
+                  {editCue.reconciled_zh ? (
+                    <div className="t">Reconciled: {editCue.reconciled_zh}</div>
+                  ) : null}
                   <div className="form-row">
                     <button type="button" onClick={() => void saveEditCue()}>
                       Save cue
@@ -1271,9 +1592,19 @@ export function App() {
               ) : null}
               <ul className="cue-list">
                 {cues.map((c) => (
-                  <li key={`t-${c.start}-${c.index}`} className={c.uncertain ? "uncertain-item" : undefined}>
+                  <li
+                    key={`t-${c.start}-${c.index}`}
+                    className={
+                      c.audio_disagreement
+                        ? "audio-disagree-item"
+                        : c.uncertain
+                          ? "uncertain-item"
+                          : undefined
+                    }
+                  >
                     <div className="t">
                       #{c.index} · {formatTime(c.start)}–{formatTime(c.end)}
+                      {c.maturity ? ` · ${c.maturity}` : ""}
                       {typeof c.ocr_confidence === "number"
                         ? ` · OCR ${Math.round(c.ocr_confidence * 100)}%`
                         : typeof c.confidence === "number"
