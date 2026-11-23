@@ -41,10 +41,13 @@ function formatTime(sec: number): string {
   return `${m}:${r.toString().padStart(2, "0")}`;
 }
 
-/** Seconds of cue coverage ahead of playhead before Play is unlocked. */
-const BUFFER_AHEAD_TARGET_S = 12;
-const BUFFER_MIN_CUES = 3;
+/** Live Ready: small playhead-ahead buffer (wall ≤30s). Quality uses a deeper gate. */
+const LIVE_BUFFER_AHEAD_TARGET_S = 5;
+const LIVE_BUFFER_MIN_CUES = 1;
+const QUALITY_BUFFER_AHEAD_TARGET_S = 12;
+const QUALITY_BUFFER_MIN_CUES = 3;
 
+type WatchMode = "live" | "quality";
 type SubtitleGate = "idle" | "preparing" | "ready";
 
 interface BufferStatus {
@@ -58,8 +61,16 @@ function cueHasText(c: Cue): boolean {
   return Boolean((c.text_en || "").trim() || (c.text_zh || "").trim());
 }
 
-function computeBufferStatus(cues: Cue[], t: number, jobDone: boolean): BufferStatus {
-  const windowEnd = t + BUFFER_AHEAD_TARGET_S;
+function computeBufferStatus(
+  cues: Cue[],
+  t: number,
+  jobDone: boolean,
+  watchMode: WatchMode = "live",
+  engineBufferAhead: number | null = null
+): BufferStatus {
+  const target = watchMode === "live" ? LIVE_BUFFER_AHEAD_TARGET_S : QUALITY_BUFFER_AHEAD_TARGET_S;
+  const minCues = watchMode === "live" ? LIVE_BUFFER_MIN_CUES : QUALITY_BUFFER_MIN_CUES;
+  const windowEnd = t + target;
   const inWindow = cues.filter(
     (c) => cueHasText(c) && c.end > t - 0.25 && c.start < windowEnd + 0.5
   );
@@ -68,6 +79,10 @@ function computeBufferStatus(cues: Cue[], t: number, jobDone: boolean): BufferSt
     const farthest = inWindow.reduce((m, c) => Math.max(m, c.end), t);
     coveredAhead = Math.max(0, farthest - t);
   }
+  // Prefer engine frontier when it reports further ahead than cue ends alone
+  if (engineBufferAhead != null && engineBufferAhead > coveredAhead) {
+    coveredAhead = engineBufferAhead;
+  }
   const hasActiveOrNear = cues.some(
     (c) => cueHasText(c) && c.start <= t + 2.5 && c.end >= t - 0.15
   );
@@ -75,9 +90,15 @@ function computeBufferStatus(cues: Cue[], t: number, jobDone: boolean): BufferSt
   const ready =
     jobDone && cues.some(cueHasText)
       ? true
-      : (coveredAhead >= BUFFER_AHEAD_TARGET_S * 0.7 && cueCountInWindow >= 2) ||
-        (cueCountInWindow >= BUFFER_MIN_CUES && coveredAhead >= 6) ||
-        (hasActiveOrNear && cueCountInWindow >= BUFFER_MIN_CUES && coveredAhead >= 4);
+      : watchMode === "live"
+        ? // Live: unlock once a small playhead-ahead scan exists (silence OK) or first cue
+          (engineBufferAhead ?? 0) >= 2.5 ||
+          (cueCountInWindow >= minCues && coveredAhead >= 2) ||
+          (hasActiveOrNear && cueCountInWindow >= 1) ||
+          (cues.some(cueHasText) && (engineBufferAhead ?? 0) >= 1.5)
+        : (coveredAhead >= target * 0.7 && cueCountInWindow >= 2) ||
+          (cueCountInWindow >= minCues && coveredAhead >= 6) ||
+          (hasActiveOrNear && cueCountInWindow >= minCues && coveredAhead >= 4);
   return { ready, coveredAhead, cueCountInWindow, hasActiveOrNear };
 }
 
@@ -160,6 +181,7 @@ export function App() {
   const [reviewOpen, setReviewOpen] = useState(true);
   const [engines, setEngines] = useState<EngineInfo[]>([]);
   const [engineId, setEngineId] = useState("argos");
+  const [watchMode, setWatchMode] = useState<WatchMode>("live");
   const [glossary, setGlossary] = useState<GlossaryData | null>(null);
   const [gZh, setGZh] = useState("");
   const [gEn, setGEn] = useState("");
@@ -322,8 +344,15 @@ export function App() {
 
   const bufferClock = subtitleGate === "preparing" ? bufferOrigin : playTime;
   const bufferStatus = useMemo(
-    () => computeBufferStatus(cues, bufferClock, status === "done"),
-    [cues, bufferClock, status]
+    () =>
+      computeBufferStatus(
+        cues,
+        bufferClock,
+        status === "done",
+        watchMode,
+        bufferAhead
+      ),
+    [cues, bufferClock, status, watchMode, bufferAhead]
   );
 
   useEffect(() => {
@@ -723,7 +752,10 @@ export function App() {
     }
     try {
       // Optional on older sidecars — never block Process on /engines/select 404
-      await apiSendOptional("/engines/select", "POST", { engine_id: engineId });
+      const live = watchMode === "live";
+      const engineForJob = live ? "argos" : engineId;
+      if (live && engineId !== "argos") setEngineId("argos");
+      await apiSendOptional("/engines/select", "POST", { engine_id: engineForJob });
       const job = await apiSend<{
         id: string;
         srt_path: string;
@@ -731,14 +763,15 @@ export function App() {
         duration: number;
       }>("/jobs", "POST", {
         video_path: videoPath,
-        fps: 1.0,
+        fps: live ? 1.0 : 1.0,
         band_ratio: 0.2,
-        lookahead: 12,
+        lookahead: live ? 8 : 12,
         playhead: startAt,
-        engine_id: engineId,
-        context_window_s: 120,
-        high_accuracy: true,
-        audio_verify: audioVerify,
+        engine_id: engineForJob,
+        context_window_s: live ? 30 : 120,
+        live_mode: live,
+        high_accuracy: live ? false : true,
+        audio_verify: live ? false : audioVerify,
       });
       setJobId(job.id);
       setSrtPath(job.srt_path);
@@ -1018,13 +1051,31 @@ export function App() {
               {bilingual ? "ZH+EN" : "EN"}
             </button>
           </div>
-          <div className="tool-group" data-label="Audio">
-            <label className="audio-toggle" title="EOF Chinese ASR vs OCR — never overwrites OCR">
+          <div className="tool-group" data-label="Mode">
+            <select
+              value={watchMode}
+              onChange={(e) => setWatchMode(e.target.value as WatchMode)}
+              title="Live = keep-up watch (default). Quality = offline heavy pipeline."
+              disabled={busy || status === "running" || status === "paused" || status === "queued"}
+            >
+              <option value="live">Live</option>
+              <option value="quality">Quality</option>
+            </select>
+            <label
+              className="audio-toggle"
+              title="EOF Chinese ASR vs OCR — Quality mode only; off Live path"
+            >
               <input
                 type="checkbox"
                 checked={audioVerify}
                 onChange={(e) => setAudioVerify(e.target.checked)}
-                disabled={busy || status === "running" || status === "paused" || status === "queued"}
+                disabled={
+                  watchMode === "live" ||
+                  busy ||
+                  status === "running" ||
+                  status === "paused" ||
+                  status === "queued"
+                }
               />
               Verify
               {audioReady?.ready === false ? " (install)" : ""}
@@ -1036,7 +1087,7 @@ export function App() {
               onClick={() => void startProcess()}
               disabled={!videoPath || busy || status === "running" || engineOk === false}
             >
-              {status === "running" ? "Live…" : "Process"}
+              {status === "running" ? (watchMode === "live" ? "Live…" : "Quality…") : "Process"}
             </button>
             {status === "running" ? (
               <button type="button" className="secondary" onClick={() => void pauseJob()}>
@@ -1138,7 +1189,11 @@ export function App() {
                       <strong>Preparing subtitles…</strong>
                       <span>
                         Buffering near playhead · {bufferStatus.cueCountInWindow} cues ·{" "}
-                        {bufferStatus.coveredAhead.toFixed(1)}s / {BUFFER_AHEAD_TARGET_S}s ahead
+                        {bufferStatus.coveredAhead.toFixed(1)}s /{" "}
+                        {watchMode === "live"
+                          ? LIVE_BUFFER_AHEAD_TARGET_S
+                          : QUALITY_BUFFER_AHEAD_TARGET_S}
+                        s ahead
                       </span>
                     </>
                   ) : (

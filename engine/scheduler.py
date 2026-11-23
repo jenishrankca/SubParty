@@ -18,22 +18,30 @@ class PerformanceScheduler:
     """
     Keep live keep-up: when lagging, favor OCR near playhead;
     when buffered, spend cycles on refine / timing of uncertain cues.
+    Live mode: coarser catch-up strides; defer refine until buffer healthy.
     """
 
     live_lag: float = 0.0
     buffer_ahead: float = 0.0
     avg_slot_s: float = 0.8
+    live_mode: bool = True
 
     def mode(self) -> str:
-        if self.live_lag > 1.5:
+        if self.live_lag > 1.0:
             return "catch_up"
-        if self.buffer_ahead >= 2.0 and self.live_lag < 0.5:
+        if self.buffer_ahead >= (3.0 if self.live_mode else 2.0) and self.live_lag < 0.4:
             return "refine"
         return "balanced"
 
     def ocr_interval_bounds(self) -> tuple[float, float]:
         """min,max sample interval for current mode."""
         mode = self.mode()
+        if self.live_mode:
+            if mode == "catch_up":
+                return 1.2, 3.5
+            if mode == "refine":
+                return 0.8, 1.8
+            return 1.0, 2.5
         if mode == "catch_up":
             return 0.9, 2.8
         if mode == "refine":
@@ -41,9 +49,18 @@ class PerformanceScheduler:
         return 0.5, 1.8
 
     def should_run_refine(self) -> bool:
+        if self.live_mode:
+            # Defer heavy refine off the live path until comfortably ahead
+            return (
+                self.mode() == "refine"
+                and self.live_lag < 0.3
+                and self.buffer_ahead >= 4.0
+            )
         return self.mode() in {"refine", "balanced"} and self.live_lag < 1.2
 
     def should_dense_transitions(self) -> bool:
+        if self.live_mode:
+            return False
         return self.mode() != "catch_up"
 
 

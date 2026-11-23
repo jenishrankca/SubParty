@@ -92,11 +92,12 @@ class StartJobRequest(BaseModel):
     video_path: str = Field(..., min_length=1)
     fps: float = Field(1.0, ge=0.5, le=5.0)
     band_ratio: float = Field(0.2, ge=0.1, le=0.5)
-    lookahead: float = Field(12.0, ge=4.0, le=60.0)
+    lookahead: float = Field(8.0, ge=4.0, le=60.0)
     playhead: float = Field(0.0, ge=0.0)
     engine_id: str = Field("argos", min_length=1)
-    context_window_s: float = Field(120.0, ge=15.0, le=600.0)
-    high_accuracy: bool = True
+    context_window_s: float = Field(30.0, ge=15.0, le=600.0)
+    live_mode: bool = True
+    high_accuracy: bool | None = None
     audio_verify: bool | None = None
 
 
@@ -226,8 +227,9 @@ class JobResponse(BaseModel):
     engine_id: str = "argos"
     paused: bool = False
     batch_id: str | None = None
-    context_window_s: float = 120.0
-    high_accuracy: bool = True
+    context_window_s: float = 30.0
+    live_mode: bool = True
+    high_accuracy: bool = False
     audio_verify: bool = False
     audio_summary: dict[str, Any] = {}
     error: str | None = None
@@ -258,10 +260,11 @@ def health() -> dict[str, Any]:
         "ffmpeg": ffmpeg_ok,
         "ffprobe": ffprobe_ok,
         "error": ffmpeg_err,
-        "version": "2.1.0",
-        "mode": "accuracy-validation+maturity+frame-timing+audio-verify",
+        "version": "2.2.0",
+        "mode": "live-keepup+quality-offline",
         "auth": True,
-        "context_window_s_default": 120,
+        "live_mode_default": True,
+        "context_window_s_default": 30,
         "data_dir": str(app_data_dir()),
         "cue_maturity": [
             "provisional",
@@ -296,6 +299,7 @@ def start_job(body: StartJobRequest) -> JobResponse:
             playhead=body.playhead,
             engine_id=body.engine_id,
             context_window_s=body.context_window_s,
+            live_mode=body.live_mode,
             high_accuracy=body.high_accuracy,
             audio_verify=body.audio_verify,
         )
@@ -927,8 +931,9 @@ def _to_response(job: Any) -> JobResponse:
         engine_id=getattr(job, "engine_id", "argos"),
         paused=bool(getattr(job, "paused", False)),
         batch_id=getattr(job, "batch_id", None),
-        context_window_s=float(getattr(job, "context_window_s", 120.0)),
-        high_accuracy=bool(getattr(job, "high_accuracy", True)),
+        context_window_s=float(getattr(job, "context_window_s", 30.0)),
+        live_mode=bool(getattr(job, "live_mode", True)),
+        high_accuracy=bool(getattr(job, "high_accuracy", False)),
         audio_verify=bool(getattr(job, "audio_verify", False)),
         audio_summary=dict(getattr(job, "audio_summary", None) or {}),
         error=job.error,

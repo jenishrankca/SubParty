@@ -19,7 +19,7 @@ from ocr import ocr_lines, warm_ocr
 from audio_verify import audio_verify_enabled, verify_cue_records, whisper_available
 from metrics import realtime_factor
 from refine import finalize_cues_at_eof, refine_batch
-from region import SubtitleRegion, default_bottom_region, detect_subtitle_region
+from region import SubtitleRegion, detect_subtitle_region
 from revision import CueRecord
 from scheduler import PerformanceScheduler
 from srt_writer import Cue, SrtWriter, merge_cue_payloads
@@ -36,8 +36,12 @@ _MIN_INTERVAL = 0.5
 _MAX_INTERVAL = 2.8
 _MIN_INTERVAL_ACCURACY = 0.35
 _DEFAULT_LOOKAHEAD = 10.0
-_SEEK_COOLDOWN_S = 2.5  # after seek: snap to playhead, denser near-now window
+_DEFAULT_LOOKAHEAD_LIVE = 8.0
+_SEEK_COOLDOWN_S = 2.0  # after seek: snap to playhead, drop backlog
 _DEFAULT_CONTEXT_WINDOW_S = 120.0
+_LIVE_CONTEXT_WINDOW_S = 30.0
+_LIVE_SCALE_WIDTH = 320
+_QUALITY_SCALE_WIDTH = 640
 
 
 @dataclass
@@ -62,7 +66,8 @@ class JobState:
     paused: bool = False
     batch_id: str | None = None
     context_window_s: float = _DEFAULT_CONTEXT_WINDOW_S
-    high_accuracy: bool = True
+    live_mode: bool = True
+    high_accuracy: bool = False
     audio_verify: bool = False
     audio_summary: dict[str, Any] = field(default_factory=dict)
     cue_records: list[CueRecord] = field(default_factory=list, repr=False)
@@ -84,13 +89,14 @@ class JobManager:
         video_path: str,
         fps: float = 1.0,
         band_ratio: float = 0.2,
-        lookahead: float = _DEFAULT_LOOKAHEAD,
+        lookahead: float | None = None,
         playhead: float = 0.0,
         engine_id: str = "argos",
         batch_id: str | None = None,
         resume_job_id: str | None = None,
-        context_window_s: float = _DEFAULT_CONTEXT_WINDOW_S,
-        high_accuracy: bool = True,
+        context_window_s: float | None = None,
+        live_mode: bool = True,
+        high_accuracy: bool | None = None,
         audio_verify: bool | None = None,
     ) -> JobState:
         path = Path(video_path)
@@ -102,20 +108,41 @@ class JobManager:
         srt_path = str(path.parent / f"{path.stem}.en.srt")
         job_id = resume_job_id or str(uuid.uuid4())
         job = JobState(id=job_id, video_path=str(path), srt_path=srt_path)
+        job.live_mode = bool(live_mode)
+        # Live = speed path (Argos + provisional); Quality = heavy pipeline
+        if job.live_mode:
+            job.high_accuracy = False if high_accuracy is None else bool(high_accuracy)
+            job.audio_verify = False  # never on live path
+            job.context_window_s = max(
+                15.0,
+                float(context_window_s if context_window_s is not None else _LIVE_CONTEXT_WINDOW_S),
+            )
+            job.context_window_s = min(job.context_window_s, 45.0)
+            la = float(lookahead if lookahead is not None else _DEFAULT_LOOKAHEAD_LIVE)
+        else:
+            job.high_accuracy = True if high_accuracy is None else bool(high_accuracy)
+            job.audio_verify = audio_verify_enabled(audio_verify)
+            job.context_window_s = max(
+                15.0,
+                float(context_window_s if context_window_s is not None else _DEFAULT_CONTEXT_WINDOW_S),
+            )
+            la = float(lookahead if lookahead is not None else _DEFAULT_LOOKAHEAD)
         job.sample_interval = 1.0 / max(0.5, fps)
         job.playhead = max(0.0, float(playhead))
-        job.engine_id = (engine_id or "argos").strip().lower()
+        # Live defaults to Argos; quality may use heavier engines
+        eng = (engine_id or "argos").strip().lower()
+        if job.live_mode and eng in {"nllb", "qwen", "qwen2"}:
+            logger.info("live mode: forcing Argos (requested %s)", eng)
+            eng = "argos"
+        job.engine_id = eng
         job.batch_id = batch_id
-        job.context_window_s = max(15.0, float(context_window_s))
-        job.high_accuracy = bool(high_accuracy)
-        job.audio_verify = audio_verify_enabled(audio_verify)
         with self._lock:
             self._jobs[job.id] = job
             self._listeners[job.id] = []
 
         thread = threading.Thread(
             target=self._run,
-            args=(job.id, band_ratio, lookahead),
+            args=(job.id, band_ratio, la),
             daemon=True,
             name=f"subparty-job-{job.id[:8]}",
         )
@@ -309,6 +336,9 @@ class JobManager:
             job.playhead = max(0.0, float(t))
             if abs(job.playhead - prev) >= 1.5:
                 job._seek_event.set()
+                # Stale frontier must not look "healthy" after a jump
+                job.buffer_ahead = 0.0
+                job.live_lag = max(0.0, abs(job.playhead - prev))
         return True
 
     def cancel(self, job_id: str, *, discard: bool = True) -> bool:
@@ -362,7 +392,9 @@ class JobManager:
 
         try:
             warm_ocr()
-            warm_translate(job.engine_id)
+            # Live: defer Argos/NLLB warm until first dialogue — saves cold-start wall
+            if not job.live_mode:
+                warm_translate(job.engine_id)
 
             video = Path(job.video_path)
             duration = probe_duration(video)
@@ -374,28 +406,33 @@ class JobManager:
             job.series_id = gloss.series_id
             dial_ctx = DialogueContext(window=6, glossary=gloss, engine_id=job.engine_id)
             buffer = DialogueBuffer(window_s=job.context_window_s)
-            perf = PerformanceScheduler()
+            perf = PerformanceScheduler(live_mode=job.live_mode)
             job.cue_records = []
             self._persist(job)
 
-            # Auto subtitle region (anywhere); fall back to bottom band
-            try:
-                with job._playhead_lock:
-                    ph0 = job.playhead
-                sample_t = [
-                    max(0.5, ph0),
-                    max(0.5, ph0 + 4),
-                    max(0.5, ph0 + 12),
-                    max(0.5, min(duration - 1, ph0 + 30) if duration > 2 else ph0 + 2),
-                ]
-                region = detect_subtitle_region(video, sample_times=sample_t, duration=duration)
-            except Exception as exc:
-                logger.warning("region detect failed: %s", exc)
-                region = default_bottom_region()
-                # legacy band_ratio override
+            # Live: skip multi-frame region detect (cold-start cost); quality: auto-detect
+            if job.live_mode:
                 region = SubtitleRegion(
                     x=0.06, y=1.0 - band_ratio, w=0.88, h=band_ratio
                 ).clamp()
+            else:
+                try:
+                    with job._playhead_lock:
+                        ph0 = job.playhead
+                    sample_t = [
+                        max(0.5, ph0),
+                        max(0.5, ph0 + 4),
+                        max(0.5, ph0 + 12),
+                        max(0.5, min(duration - 1, ph0 + 30) if duration > 2 else ph0 + 2),
+                    ]
+                    region = detect_subtitle_region(
+                        video, sample_times=sample_t, duration=duration
+                    )
+                except Exception as exc:
+                    logger.warning("region detect failed: %s", exc)
+                    region = SubtitleRegion(
+                        x=0.06, y=1.0 - band_ratio, w=0.88, h=band_ratio
+                    ).clamp()
             job.region = {
                 "x": region.x,
                 "y": region.y,
@@ -411,11 +448,13 @@ class JobManager:
                     "region": job.region,
                     "series_id": job.series_id,
                     "glossary_terms": len(gloss.terms),
+                    "live_mode": job.live_mode,
                 },
             )
 
-            # Quantized sample grid uses a *base* tick; adaptive stride skips ticks when lagging
-            base_tick = 0.5  # fine grid; we jump by adaptive stride
+            # Live: 1.0s grid (fewer OCR); quality: 0.5s fine grid
+            base_tick = 1.0 if job.live_mode else 0.5
+            scale_w = _LIVE_SCALE_WIDTH if job.live_mode else _QUALITY_SCALE_WIDTH
             n_ticks = max(1, int(duration / base_tick) + 1)
             done: set[int] = set()
             slot_text: dict[int, str] = {}
@@ -432,6 +471,9 @@ class JobManager:
             seek_until = 0.0
             last_playhead = job.playhead
             last_playhead_wall = time.perf_counter()
+            translate_warmed = not job.live_mode
+            # Live cold-start: dense ticks until a small buffer exists (≤30s Ready)
+            live_priming = job.live_mode
 
             with tempfile.TemporaryDirectory(prefix="subparty_") as tmp:
                 tmp_dir = Path(tmp)
@@ -456,15 +498,18 @@ class JobManager:
                     job._seek_event.clear()
                     if seeked:
                         seek_until = time.perf_counter() + _SEEK_COOLDOWN_S
-                        # Drop unfinished backlog markers behind new playhead so we don't crawl
+                        # Drop ALL unfinished backlog behind new playhead — retarget now
                         with job._playhead_lock:
                             ph_now = job.playhead
                         ph_tick0 = max(0, int(ph_now / base_tick))
-                        # Keep done set but mark gaps behind as skippable empties when far behind
-                        for s in range(max(0, ph_tick0 - int(8.0 / base_tick)), ph_tick0):
+                        for s in range(0, ph_tick0):
                             if s not in done:
                                 done.add(s)
                                 slot_text.setdefault(s, "")
+                                slot_conf.setdefault(s, 0.0)
+                        lag_ema = 0.0  # reset lag estimate after seek
+                        if job.live_mode:
+                            live_priming = True  # dense re-buffer around new playhead
 
                     with job._playhead_lock:
                         playhead = job.playhead
@@ -484,38 +529,63 @@ class JobManager:
                     perf.live_lag = lag_ema
                     perf.buffer_ahead = job.buffer_ahead
                     perf.avg_slot_s = avg_s
+                    perf.live_mode = job.live_mode
                     min_iv, max_iv = perf.ocr_interval_bounds()
-                    if job.high_accuracy and perf.mode() != "catch_up":
+                    if job.high_accuracy and not job.live_mode and perf.mode() != "catch_up":
                         min_iv = min(min_iv, _MIN_INTERVAL_ACCURACY)
 
-                    if in_seek or lag_ema > 3.5 or scrubbing:
-                        interval = min(max_iv, max(avg_s * 1.15, 1.2))
-                        lookahead = 3.5 if scrubbing else 5.0
-                    elif lag_ema > 1.2:
-                        interval = min(max_iv, max(avg_s * 1.05, 0.95))
-                        lookahead = max(5.0, base_lookahead * 0.7)
-                    elif lag_ema < -1.5 and dialogue_streak > 0:
+                    if live_priming and job.buffer_ahead < 2.5 and not in_seek and not scrubbing:
+                        # Dense contiguous samples until Ready buffer exists
+                        interval = base_tick
+                        lookahead = max(base_lookahead, 6.0)
+                        stride_ticks = 1
+                    elif in_seek or lag_ema > 3.5 or scrubbing:
+                        interval = min(max_iv, max(avg_s * 1.15, 1.5 if job.live_mode else 1.2))
+                        lookahead = 3.0 if scrubbing else (4.0 if job.live_mode else 5.0)
+                        stride_ticks = max(1, int(round(interval / base_tick)))
+                    elif lag_ema > 1.0:
+                        interval = min(max_iv, max(avg_s * 1.1, 1.2 if job.live_mode else 0.95))
+                        lookahead = max(4.0, base_lookahead * 0.65)
+                        stride_ticks = max(1, int(round(interval / base_tick)))
+                    elif lag_ema < -1.5 and dialogue_streak > 0 and not job.live_mode:
                         interval = max(min_iv, min(avg_s * 0.8, 0.7))
                         lookahead = min(20.0, base_lookahead * 1.4)
-                    elif lag_ema < -1.0:
+                        stride_ticks = max(1, int(round(interval / base_tick)))
+                    elif lag_ema < -1.0 and not job.live_mode:
                         interval = max(min_iv, min(avg_s * 0.9, 0.9))
                         lookahead = min(16.0, base_lookahead * 1.2)
+                        stride_ticks = max(1, int(round(interval / base_tick)))
                     else:
-                        target = max(avg_s * 1.02, 0.5 if avg_s < 0.55 else 0.7)
+                        if job.live_mode:
+                            target = max(avg_s * 1.05, 1.0)
+                        else:
+                            target = max(avg_s * 1.02, 0.5 if avg_s < 0.55 else 0.7)
                         interval = max(min_iv, min(max_iv, target))
                         lookahead = base_lookahead
+                        stride_ticks = max(1, int(round(interval / base_tick)))
 
-                    stride_ticks = max(1, int(round(interval / base_tick)))
-                    if blank_streak >= 2:
-                        stride_ticks = max(stride_ticks, int(round(1.4 / base_tick)))
-                    if blank_streak >= 5:
-                        stride_ticks = max(stride_ticks, int(round(2.2 / base_tick)))
-                    if dialogue_streak >= 2 and lag_ema < 0.8 and not in_seek:
+                    if not live_priming:
+                        if blank_streak >= 2:
+                            stride_ticks = max(
+                                stride_ticks,
+                                int(round((2.0 if job.live_mode else 1.4) / base_tick)),
+                            )
+                        if blank_streak >= 5:
+                            stride_ticks = max(
+                                stride_ticks,
+                                int(round((3.0 if job.live_mode else 2.2) / base_tick)),
+                            )
+                    if (
+                        dialogue_streak >= 2
+                        and lag_ema < 0.8
+                        and not in_seek
+                        and not job.live_mode
+                    ):
                         stride_ticks = max(1, min(stride_ticks, int(round(0.55 / base_tick))))
 
                     job.sample_interval = stride_ticks * base_tick
 
-                    # Transition-aware: prefer denser holes near text changes
+                    # Transition-aware densify only in quality mode
                     tick = None
                     if perf.should_dense_transitions() and job.high_accuracy and done:
                         last_done = max(done)
@@ -533,11 +603,28 @@ class JobManager:
                             playhead=playhead,
                             lookahead=lookahead,
                             stride_ticks=stride_ticks,
-                            lagging=lag_ema > 1.0 or in_seek or scrubbing,
-                            near_window_s=1.4 if (dialogue_streak or lag_ema < 0.5) else 0.7,
+                            lagging=(
+                                lag_ema > 0.8
+                                or in_seek
+                                or scrubbing
+                                or (job.live_mode and not live_priming)
+                            ),
+                            near_window_s=(
+                                2.0
+                                if live_priming
+                                else (
+                                    0.5
+                                    if job.live_mode
+                                    else (1.4 if (dialogue_streak or lag_ema < 0.5) else 0.7)
+                                )
+                            ),
                         )
                     if tick is None:
                         break
+
+                    # If a seek arrived while we were picking, drop this tick and retarget
+                    if job._seek_event.is_set():
+                        continue
 
                     t = min(duration, tick * base_tick)
                     frame_path = tmp_dir / f"frame_{tick:07d}.png"
@@ -553,8 +640,11 @@ class JobManager:
                             h_ratio=region.h,
                             height=frame_h,
                             width=frame_w,
-                            scale_width=640,
+                            scale_width=scale_w,
                         )
+                        # Seek mid-extract: discard result and retarget
+                        if job._seek_event.is_set():
+                            continue
                         filtered = filter_ocr_result(ocr_lines(str(frame_path)))
                         zh = filtered.text
                         conf = filtered.confidence
@@ -567,13 +657,24 @@ class JobManager:
                     if len(timings) > 30:
                         timings = timings[-30:]
 
+                    # Seek during OCR: do not commit this tick (wrong region)
+                    if job._seek_event.is_set():
+                        continue
+
                     done.add(tick)
                     slot_text[tick] = zh
                     slot_conf[tick] = conf if zh else 0.0
-                    # When lagging hard, skip unfinished ticks behind playhead
-                    if lag_ema > 1.8 or in_seek:
+                    # Live stride: fill intentional holes so buffer_ahead advances contiguously
+                    if job.live_mode and stride_ticks > 1:
+                        for s in range(max(0, tick - stride_ticks + 1), tick):
+                            if s not in done:
+                                done.add(s)
+                                slot_text.setdefault(s, zh if zh else "")
+                                slot_conf.setdefault(s, conf if zh else 0.0)
+                    # When lagging / seeking / live catch-up: skip unfinished ticks behind playhead
+                    if lag_ema > 1.2 or in_seek or (job.live_mode and lag_ema > 0.5):
                         ph_tick = max(0, int(playhead / base_tick))
-                        skip_back = int((3.0 if in_seek else 2.0) / base_tick)
+                        skip_back = ph_tick if in_seek else int((4.0 if job.live_mode else 2.0) / base_tick)
                         for s in range(max(0, ph_tick - skip_back), ph_tick):
                             if s not in done:
                                 done.add(s)
@@ -583,6 +684,12 @@ class JobManager:
                     if zh:
                         blank_streak = 0
                         dialogue_streak = min(8, dialogue_streak + 1)
+                        if not translate_warmed:
+                            try:
+                                warm_translate(job.engine_id)
+                            except Exception as exc:
+                                logger.warning("deferred translate warm failed: %s", exc)
+                            translate_warmed = True
                     else:
                         blank_streak += 1
                         dialogue_streak = max(0, dialogue_streak - 1)
@@ -624,15 +731,17 @@ class JobManager:
                     frontier_t = frontier * base_tick if frontier >= 0 else playhead - 30
                     job.live_lag = playhead - frontier_t
                     job.buffer_ahead = max(0.0, frontier_t - playhead)
+                    if live_priming and job.buffer_ahead >= 2.5:
+                        live_priming = False
                     observed_until = max(playhead, frontier_t, t)
 
-                    # Retroactive refine when performance scheduler allows
+                    # Retroactive refine when scheduler allows (deferred on live path)
                     if perf.should_run_refine() and job.cue_records:
                         changed = refine_batch(
                             job.cue_records,
                             dial_ctx=dial_ctx,
                             buffer=buffer,
-                            limit=4 if perf.mode() == "refine" else 2,
+                            limit=1 if job.live_mode else (4 if perf.mode() == "refine" else 2),
                             observed_until=observed_until,
                         )
                         for rec in changed:
@@ -660,6 +769,7 @@ class JobManager:
                             "seek_boost": in_seek,
                             "scheduler_mode": perf.mode(),
                             "context_window_s": job.context_window_s,
+                            "live_mode": job.live_mode,
                             "context_buffer": buffer.as_dict(),
                         },
                     )
@@ -676,8 +786,8 @@ class JobManager:
                 self._emit(job, {"type": "status", "status": "cancelled", "progress": job.progress})
                 return
 
-            # EOF: full-buffer refine → context-complete → final
-            if job.cue_records:
+            # EOF: full-buffer refine (quality always; live light pass only)
+            if job.cue_records and (not job.live_mode or job.high_accuracy):
                 for rec in finalize_cues_at_eof(
                     job.cue_records,
                     dial_ctx=dial_ctx,
@@ -686,8 +796,8 @@ class JobManager:
                 ):
                     self._publish_record(job, writer, rec)
 
-            # Phase B: optional audio verification (never overwrites OCR source)
-            if job.audio_verify and job.cue_records:
+            # Phase B: audio verification only off live path (Quality mode)
+            if job.audio_verify and not job.live_mode and job.cue_records:
                 if not whisper_available():
                     job.audio_summary = {
                         "ok": False,
@@ -755,6 +865,7 @@ class JobManager:
                     "rtf": round(rtf, 4) if rtf is not None else None,
                     "live_latency_s": round(job.live_lag, 3),
                     "context_window_s": job.context_window_s,
+                    "live_mode": job.live_mode,
                     "audio_verify": job.audio_verify,
                     "audio": job.audio_summary or None,
                 },
@@ -841,6 +952,7 @@ class JobManager:
                         fine_cache[key_t] = ("", 0.0)
                     return fine_cache[key_t]
 
+                do_fine = bool(job.high_accuracy and not job.live_mode)
                 timing = refine_boundaries(
                     zh=zh,
                     rough_start=rough_start,
@@ -849,9 +961,9 @@ class JobManager:
                     slot_conf=slot_conf,
                     base_tick=interval,
                     duration=duration,
-                    high_accuracy=job.high_accuracy,
+                    high_accuracy=do_fine,
                     fine_step_s=DEFAULT_FINE_STEP_S,
-                    probe_zh=_probe if job.high_accuracy else None,
+                    probe_zh=_probe if do_fine else None,
                 )
                 # Extend existing record for same ZH near start, else provisional new
                 existing = next(
@@ -884,12 +996,17 @@ class JobManager:
                 else:
                     prior, upcoming = buffer.context_zh(timing.start)
                     try:
+                        # Live: single-candidate translate (faster); Quality: compare
                         en = (
                             dial_ctx.translate(
                                 zh,
-                                upcoming=upcoming[:12] or _upcoming_zh(slot_text, done, s1, limit=4),
-                                prior_override=prior[-24:] or None,
-                                compare_candidates=True,
+                                upcoming=(
+                                    upcoming[:6]
+                                    if job.live_mode
+                                    else (upcoming[:12] or _upcoming_zh(slot_text, done, s1, limit=4))
+                                ),
+                                prior_override=prior[-12:] if job.live_mode else (prior[-24:] or None),
+                                compare_candidates=not job.live_mode,
                             )
                             or zh
                         )

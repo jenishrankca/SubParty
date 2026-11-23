@@ -127,7 +127,7 @@ def extract_region(
         crop_w = max(64, width - x)
     if y + crop_h > height:
         crop_h = max(32, height - y)
-    sw = max(320, int(scale_width))
+    sw = max(240, int(scale_width))
     vf = f"crop={crop_w}:{crop_h}:{x}:{y},scale={sw}:-1"
     _run_ffmpeg_frame(video_path, timestamp, out_path, vf)
 
