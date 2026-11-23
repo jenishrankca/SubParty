@@ -166,3 +166,20 @@ class SrtWriter:
 
     def append(self, cue: Cue) -> Cue:
         return self.upsert_and_rewrite(cue)
+
+    def rewrite_all(self, cues: list[Cue]) -> list[Cue]:
+        """Replace entire cue list and rewrite SRT (used by editor saves)."""
+        with self._lock:
+            cleaned = sorted(cues, key=lambda c: (c.start, c.end))
+            # Clamp overlaps
+            for i in range(1, len(cleaned)):
+                if cleaned[i - 1].end > cleaned[i].start:
+                    cleaned[i - 1].end = cleaned[i].start
+            cleaned = [c for c in cleaned if c.end - c.start >= 0.04]
+            blocks: list[str] = []
+            for i, c in enumerate(cleaned, start=1):
+                c.index = i
+                blocks.append(c.to_srt_block())
+            self._cues = cleaned
+            self.path.write_text("".join(blocks), encoding="utf-8")
+            return list(cleaned)

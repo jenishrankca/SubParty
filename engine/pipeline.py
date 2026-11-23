@@ -49,7 +49,11 @@ class JobState:
     buffer_ahead: float = 0.0
     series_id: str = ""
     region: dict[str, float] = field(default_factory=dict)
+    engine_id: str = "argos"
+    paused: bool = False
+    batch_id: str | None = None
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+    _pause: threading.Event = field(default_factory=threading.Event, repr=False)
     _playhead_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _seek_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -67,6 +71,9 @@ class JobManager:
         band_ratio: float = 0.2,
         lookahead: float = _DEFAULT_LOOKAHEAD,
         playhead: float = 0.0,
+        engine_id: str = "argos",
+        batch_id: str | None = None,
+        resume_job_id: str | None = None,
     ) -> JobState:
         path = Path(video_path)
         if not path.exists():
@@ -75,9 +82,12 @@ class JobManager:
             raise ValueError(f"Unsupported format: {path.suffix}")
 
         srt_path = str(path.parent / f"{path.stem}.en.srt")
-        job = JobState(id=str(uuid.uuid4()), video_path=str(path), srt_path=srt_path)
+        job_id = resume_job_id or str(uuid.uuid4())
+        job = JobState(id=job_id, video_path=str(path), srt_path=srt_path)
         job.sample_interval = 1.0 / max(0.5, fps)
         job.playhead = max(0.0, float(playhead))
+        job.engine_id = (engine_id or "argos").strip().lower()
+        job.batch_id = batch_id
         with self._lock:
             self._jobs[job.id] = job
             self._listeners[job.id] = []
@@ -90,6 +100,80 @@ class JobManager:
         )
         thread.start()
         return job
+
+    def pause(self, job_id: str) -> bool:
+        job = self._jobs.get(job_id)
+        if not job or job.status not in {"running", "paused"}:
+            return False
+        job.paused = True
+        job.status = "paused"
+        job._pause.set()
+        self._persist(job)
+        self._emit(job, {"type": "status", "status": "paused", "progress": job.progress})
+        return True
+
+    def resume(self, job_id: str) -> bool:
+        job = self._jobs.get(job_id)
+        if not job:
+            return False
+        job.paused = False
+        job.status = "running"
+        job._pause.clear()
+        self._persist(job)
+        self._emit(job, {"type": "status", "status": "running", "progress": job.progress})
+        return True
+
+    def update_cue(self, job_id: str, cue: dict[str, Any]) -> dict[str, Any] | None:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        from srt_writer import Cue, SrtWriter, merge_cue_payloads
+
+        payload = {
+            "index": int(cue.get("index") or 0),
+            "start": float(cue["start"]),
+            "end": float(cue["end"]),
+            "text_zh": str(cue.get("text_zh") or ""),
+            "text_en": str(cue.get("text_en") or ""),
+            "confidence": float(cue.get("confidence") or 1.0),
+            "uncertain": bool(cue.get("uncertain") or False),
+        }
+        job.cues = merge_cue_payloads(job.cues, payload)
+        job.cue_count = len(job.cues)
+        writer = SrtWriter(Path(job.srt_path))
+        writer.rewrite_all(
+            [
+                Cue(
+                    index=int(c["index"]),
+                    start=float(c["start"]),
+                    end=float(c["end"]),
+                    text_zh=str(c.get("text_zh") or ""),
+                    text_en=str(c.get("text_en") or ""),
+                    confidence=float(c.get("confidence") or 1.0),
+                    uncertain=bool(c.get("uncertain") or False),
+                )
+                for c in job.cues
+            ]
+        )
+        self._persist(job)
+        matched = next(
+            (c for c in job.cues if abs(float(c["start"]) - payload["start"]) < 1e-6),
+            payload,
+        )
+        self._emit(job, {"type": "cue", "cue": matched, "cue_count": job.cue_count, "srt_path": job.srt_path})
+        return matched
+
+    def list_jobs(self) -> list[JobState]:
+        with self._lock:
+            return list(self._jobs.values())
+
+    def _persist(self, job: JobState) -> None:
+        try:
+            from job_store import save_job_snapshot
+
+            save_job_snapshot(job)
+        except Exception:
+            logger.exception("persist failed")
 
     def get(self, job_id: str) -> JobState | None:
         return self._jobs.get(job_id)
@@ -139,7 +223,7 @@ class JobManager:
 
         try:
             warm_ocr()
-            warm_translate()
+            warm_translate(job.engine_id)
 
             video = Path(job.video_path)
             duration = probe_duration(video)
@@ -149,7 +233,8 @@ class JobManager:
 
             gloss = glossary_for_video(str(video))
             job.series_id = gloss.series_id
-            dial_ctx = DialogueContext(window=4, glossary=gloss)
+            dial_ctx = DialogueContext(window=6, glossary=gloss, engine_id=job.engine_id)
+            self._persist(job)
 
             # Auto subtitle region (anywhere); fall back to bottom band
             try:
@@ -205,6 +290,18 @@ class JobManager:
                 while not job._cancel.is_set():
                     if len(done) >= n_ticks:
                         break
+
+                    # Pause support — park until resumed or cancelled
+                    while job.paused and not job._cancel.is_set():
+                        job.status = "paused"
+                        self._persist(job)
+                        job._pause.wait(timeout=0.5)
+                        job._pause.clear()
+                    if job._cancel.is_set():
+                        break
+                    if job.status == "paused":
+                        job.status = "running"
+                        self._emit(job, {"type": "status", "status": "running", "progress": job.progress})
 
                     seeked = job._seek_event.is_set()
                     job._seek_event.clear()
@@ -393,11 +490,13 @@ class JobManager:
 
             if job._cancel.is_set():
                 job.status = "cancelled"
+                self._persist(job)
                 self._emit(job, {"type": "status", "status": "cancelled", "progress": job.progress})
                 return
 
             job.status = "done"
             job.progress = 1.0
+            self._persist(job)
             self._emit(
                 job,
                 {
@@ -412,6 +511,7 @@ class JobManager:
             logger.exception("job failed")
             job.status = "error"
             job.error = str(exc)
+            self._persist(job)
             self._emit(job, {"type": "error", "status": "error", "error": str(exc)})
 
     def _emit_merged_runs(
