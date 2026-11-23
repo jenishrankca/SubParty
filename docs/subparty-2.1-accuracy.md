@@ -2,7 +2,7 @@
 
 Pause new product features. Fix the four 2.0 limitations, then add audio as a separate evidence engine.
 
-## Phase A — Context maturity & timing (on `main`)
+## Phase A — Context maturity & timing (on `main` — retestable)
 
 1. **Cue maturity:** `provisional` → `context-refined` → `context-complete` → `final`
    - Horizon = configured future window (default **120s**) or EOF
@@ -26,10 +26,31 @@ cd engine
 
 Then UI: Process a clip → cues show `maturity` in timeline payloads; after EOF all `final`. Job done SSE includes `rtf` and `live_latency_s`.
 
-## Phase B — Audio Verification Engine (stub only)
+## Phase B — Audio Verification Engine (on `main` — retestable)
 
-`engine/audio_verify.py` — outline only until Phase A is solid on real episodes.
+Independent evidence stream. **Never auto-overwrites OCR** (`text_zh` / `original_ocr` stay as OCR source).
 
-- Independent of OCR (FFmpeg extract → faster-whisper candidate)
-- Never auto-overwrite OCR; keep original OCR + audio transcript + reconciled ZH + EN + revisions
-- Gate: `SUBPARTY_AUDIO_VERIFY=1` later; health reports `audio_verify.ready=false` for now
+1. **FFmpeg** mono 16 kHz WAV extract (`ffmpeg_util.extract_audio_wav`)
+2. **faster-whisper** Chinese ASR + segment timestamps (default size `small` — CUDA float16 or CPU int8; fits RTX 6GB / 16GB RAM)
+3. **Compare** OCR vs speech at character level → `audio_disagreement` + confidence; Job UI lists disagreements
+4. **Preserve fields:** `original_ocr`, `audio_transcript`, `reconciled_zh` (evidence-only; OCR kept on strong disagreement), EN via existing contextual translate when reconcile note allows
+5. **Optional wire:** `job.audio_verify=true` or `SUBPARTY_AUDIO_VERIFY=1`; EOF pass after maturity finalize; SSE `audio` + `done.audio`
+6. **Models / UI:** Models lists `faster-whisper-small`; top bar **Audio verify** checkbox; Job meta shows audio status
+
+### Install ASR (once)
+
+```bat
+cd engine
+.venv\Scripts\pip install -r requirements-audio.txt
+```
+
+Then Models → **Download / ensure** on faster-whisper (first transcribe downloads weights into `data/models`).
+
+### Retest Phase B
+
+```bat
+cd engine
+.venv\Scripts\python.exe -m unittest tests.test_audio_verify -v
+```
+
+UI: enable **Audio verify** → Process → after EOF, Job shows Audio status and **Audio disagreements** (OCR vs ASR). Health: `GET /health` → `audio_verify.ready=true` when package installed.

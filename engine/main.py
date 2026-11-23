@@ -74,6 +74,7 @@ class StartJobRequest(BaseModel):
     engine_id: str = Field("argos", min_length=1)
     context_window_s: float = Field(120.0, ge=15.0, le=600.0)
     high_accuracy: bool = True
+    audio_verify: bool | None = None
 
 
 class BatchJobRequest(BaseModel):
@@ -161,6 +162,8 @@ class JobResponse(BaseModel):
     batch_id: str | None = None
     context_window_s: float = 120.0
     high_accuracy: bool = True
+    audio_verify: bool = False
+    audio_summary: dict[str, Any] = {}
     error: str | None = None
     cues: list[dict[str, Any]] = []
 
@@ -190,7 +193,7 @@ def health() -> dict[str, Any]:
         "ffprobe": ffprobe_ok,
         "error": ffmpeg_err,
         "version": "2.1.0",
-        "mode": "accuracy-validation+maturity+frame-timing",
+        "mode": "accuracy-validation+maturity+frame-timing+audio-verify",
         "auth": True,
         "context_window_s_default": 120,
         "data_dir": str(app_data_dir()),
@@ -228,6 +231,7 @@ def start_job(body: StartJobRequest) -> JobResponse:
             engine_id=body.engine_id,
             context_window_s=body.context_window_s,
             high_accuracy=body.high_accuracy,
+            audio_verify=body.audio_verify,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -552,6 +556,8 @@ def _to_response(job: Any) -> JobResponse:
         batch_id=getattr(job, "batch_id", None),
         context_window_s=float(getattr(job, "context_window_s", 120.0)),
         high_accuracy=bool(getattr(job, "high_accuracy", True)),
+        audio_verify=bool(getattr(job, "audio_verify", False)),
+        audio_summary=dict(getattr(job, "audio_summary", None) or {}),
         error=job.error,
         cues=list(job.cues),
     )

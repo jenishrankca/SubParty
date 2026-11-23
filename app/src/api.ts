@@ -14,6 +14,36 @@ export interface Cue {
   cue_id?: string;
   revision_count?: number;
   original_ocr?: string;
+  audio_transcript?: string;
+  reconciled_zh?: string;
+  audio_disagreement?: boolean;
+  audio_evidence?: {
+    asr_confidence?: number;
+    char_similarity?: number;
+    notes?: string;
+    disagreement?: boolean;
+  };
+}
+
+export interface AudioVerifyStatus {
+  phase?: string;
+  enabled?: boolean;
+  ready?: boolean;
+  package?: string | null;
+  model_size_default?: string;
+  model_id?: string;
+  note?: string;
+  never_overwrite_ocr?: boolean;
+}
+
+export interface AudioSummary {
+  ok?: boolean;
+  error?: string;
+  disagreements?: number;
+  segments?: number;
+  cues?: number;
+  engine?: string;
+  model_size?: string;
 }
 
 export interface EngineInfo {

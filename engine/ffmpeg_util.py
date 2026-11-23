@@ -158,6 +158,53 @@ def extract_subtitle_band(
     )
 
 
+def extract_audio_wav(
+    video_path: Path,
+    out_wav: Path,
+    *,
+    sample_rate: int = 16000,
+    start_s: float | None = None,
+    duration_s: float | None = None,
+) -> Path:
+    """
+    Extract mono PCM WAV for ASR (16 kHz default).
+    Optional start/duration for cue-window extracts.
+    """
+    out_wav = Path(out_wav)
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(ffmpeg_path()),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+    ]
+    if start_s is not None and start_s > 0:
+        cmd.extend(["-ss", f"{float(start_s):.3f}"])
+    cmd.extend(["-i", str(video_path)])
+    if duration_s is not None and duration_s > 0:
+        cmd.extend(["-t", f"{float(duration_s):.3f}"])
+    cmd.extend(
+        [
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(int(sample_rate)),
+            "-c:a",
+            "pcm_s16le",
+            "-y",
+            str(out_wav),
+        ]
+    )
+    env = os.environ.copy()
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+    if result.returncode != 0 or not out_wav.exists() or out_wav.stat().st_size < 44:
+        raise RuntimeError(
+            f"ffmpeg audio extract failed: {result.stderr.strip() or result.stdout}"
+        )
+    return out_wav
+
+
 def _run_ffmpeg_frame(video_path: Path, timestamp: float, out_path: Path, vf: str) -> None:
     cmd = [
         str(ffmpeg_path()),

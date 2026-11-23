@@ -10,6 +10,8 @@ import {
   pingHealth,
   setApiBase,
   setApiToken,
+  type AudioSummary,
+  type AudioVerifyStatus,
   type Cue,
   type EngineInfo,
   type GlossaryData,
@@ -163,6 +165,9 @@ export function App() {
   const [panel, setPanel] = useState<"job" | "glossary" | "timeline" | "models">("job");
   const [batchNote, setBatchNote] = useState<string | null>(null);
   const [recovery, setRecovery] = useState<Array<Record<string, unknown>>>([]);
+  const [audioVerify, setAudioVerify] = useState(false);
+  const [audioReady, setAudioReady] = useState<AudioVerifyStatus | null>(null);
+  const [audioSummary, setAudioSummary] = useState<AudioSummary | null>(null);
   const [subtitleGate, setSubtitleGate] = useState<SubtitleGate>("idle");
   const [bufferOrigin, setBufferOrigin] = useState(0);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -323,6 +328,11 @@ export function App() {
     [cues]
   );
 
+  const audioDisagreements = useMemo(
+    () => cues.filter((c) => c.audio_disagreement),
+    [cues]
+  );
+
   async function refreshMeta() {
     try {
       const eng = await apiGet<{ engines: EngineInfo[] }>("/engines");
@@ -331,6 +341,8 @@ export function App() {
       setModels(mods.models || []);
       const rec = await apiGet<{ jobs: Array<Record<string, unknown>> }>("/recovery");
       setRecovery(rec.jobs || []);
+      const health = await apiGet<{ audio_verify?: AudioVerifyStatus }>("/health");
+      if (health.audio_verify) setAudioReady(health.audio_verify);
     } catch {
       /* auth may not be ready yet */
     }
@@ -493,6 +505,7 @@ export function App() {
     setCueCount(0);
     setProgress(0);
     setStatus("queued");
+    setAudioSummary(null);
     setSubtitleGate("preparing");
     esRef.current?.close();
     const v = videoRef.current;
@@ -521,6 +534,7 @@ export function App() {
         engine_id: engineId,
         context_window_s: 120,
         high_accuracy: true,
+        audio_verify: audioVerify,
       });
       setJobId(job.id);
       setSrtPath(job.srt_path);
@@ -564,6 +578,10 @@ export function App() {
           if (typeof data.sample_interval === "number") setSampleInterval(data.sample_interval);
           if (typeof data.series_id === "string") setSeriesId(data.series_id);
           setStatus("running");
+        } else if (type === "audio") {
+          if (data.audio && typeof data.audio === "object") {
+            setAudioSummary(data.audio as AudioSummary);
+          }
         } else if (type === "status" || type === "done" || type === "error") {
           if (typeof data.status === "string") setStatus(data.status as JobStatus);
           if (typeof data.progress === "number") setProgress(data.progress);
@@ -571,6 +589,9 @@ export function App() {
           if (typeof data.error === "string") setError(data.error);
           if (typeof data.srt_path === "string") setSrtPath(data.srt_path);
           if (typeof data.series_id === "string") setSeriesId(data.series_id);
+          if (data.audio && typeof data.audio === "object") {
+            setAudioSummary(data.audio as AudioSummary);
+          }
         } else if (type === "end") {
           es.close();
         }
@@ -777,6 +798,16 @@ export function App() {
           <button type="button" className="secondary" onClick={() => void pickBatch()} disabled={busy}>
             Batch
           </button>
+          <label className="audio-toggle" title="EOF Chinese ASR vs OCR — never overwrites OCR">
+            <input
+              type="checkbox"
+              checked={audioVerify}
+              onChange={(e) => setAudioVerify(e.target.checked)}
+              disabled={busy || status === "running" || status === "paused" || status === "queued"}
+            />
+            Audio verify
+            {audioReady?.ready === false ? " (install ASR)" : ""}
+          </label>
           <button
             type="button"
             onClick={() => void startProcess()}
@@ -1019,7 +1050,63 @@ export function App() {
                     <strong>{jobId.slice(0, 8)}</strong>
                   </div>
                 ) : null}
+                <div>
+                  <span>Audio</span>
+                  <strong>
+                    {audioVerify
+                      ? audioSummary
+                        ? audioSummary.ok === false
+                          ? `error${audioSummary.error ? `: ${audioSummary.error}` : ""}`
+                          : `${audioSummary.disagreements ?? 0} disagree · ${audioSummary.segments ?? "?"} segs`
+                        : status === "running" || status === "paused" || status === "queued"
+                          ? "queued (EOF pass)"
+                          : "on"
+                      : audioReady?.ready
+                        ? "off (ASR ready)"
+                        : "off"}
+                  </strong>
+                </div>
               </div>
+
+              {audioDisagreements.length ? (
+                <>
+                  <h2>
+                    Audio disagreements
+                    <span className="linkish" style={{ pointerEvents: "none" }}>
+                      {audioDisagreements.length}
+                    </span>
+                  </h2>
+                  <ul className="cue-list review">
+                    {audioDisagreements.slice(0, 40).map((c) => (
+                      <li key={`a-${c.cue_id || c.start}-${c.index}`} className="audio-disagree-item">
+                        <div className="t">
+                          #{c.index} · {formatTime(c.start)}–{formatTime(c.end)}
+                          {typeof c.audio_evidence?.char_similarity === "number"
+                            ? ` · sim ${Math.round(c.audio_evidence.char_similarity * 100)}%`
+                            : ""}
+                          <button
+                            type="button"
+                            className="linkish"
+                            onClick={() => {
+                              const v = videoRef.current;
+                              if (!v) return;
+                              v.currentTime = Math.max(0, c.start);
+                              setPlayTime(c.start);
+                            }}
+                          >
+                            Jump
+                          </button>
+                        </div>
+                        <div className="zh">OCR: {c.original_ocr || c.text_zh}</div>
+                        <div className="en">ASR: {c.audio_transcript || "—"}</div>
+                        {c.reconciled_zh && c.reconciled_zh !== (c.original_ocr || c.text_zh) ? (
+                          <div className="t">Reconciled: {c.reconciled_zh}</div>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
 
               {recovery.length ? (
                 <>
@@ -1215,6 +1302,12 @@ export function App() {
                     </div>
                     <div className="en">{c.text_en}</div>
                     <div className="zh">{c.text_zh}</div>
+                    {c.audio_transcript ? (
+                      <div className="t">
+                        ASR: {c.audio_transcript}
+                        {c.audio_disagreement ? " · disagreement" : ""}
+                      </div>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -1227,8 +1320,17 @@ export function App() {
               <p className="hint" style={{ opacity: 0.75, fontSize: "0.85rem", marginBottom: "0.75rem" }}>
                 Weights live under the SubParty <code>data/models</code> folder (not beside videos). After
                 install, pick the matching engine in the top bar. Only one of NLLB/Qwen stays loaded in RAM.
-                Disk: NLLB ~2.4&nbsp;GB · Qwen2.5-1.5B ~3.0&nbsp;GB. SRT still saves next to the video.
+                Disk: NLLB ~2.4&nbsp;GB · Qwen2.5-1.5B ~3.0&nbsp;GB · faster-whisper small ~500&nbsp;MB.
+                Audio ASR is optional evidence (never overwrites OCR). Install:{" "}
+                <code>pip install -r requirements-audio.txt</code>, then Ensure below, then enable{" "}
+                <strong>Audio verify</strong> on Process. SRT still saves next to the video.
               </p>
+              {audioReady ? (
+                <p className="hint" style={{ opacity: 0.8, fontSize: "0.82rem", marginBottom: "0.75rem" }}>
+                  Audio verify: {audioReady.ready ? "package ready" : "not installed"}
+                  {audioReady.note ? ` — ${audioReady.note}` : ""}
+                </p>
+              ) : null}
               <ul className="cue-list">
                 {models.map((m) => (
                   <li key={m.id}>
@@ -1250,7 +1352,7 @@ export function App() {
                     >
                       {m.installed ? "Re-check / warm" : "Download / ensure"}
                     </button>
-                    {m.installed && m.engine && m.engine !== "ocr" ? (
+                    {m.installed && m.engine && m.engine !== "ocr" && m.engine !== "audio" ? (
                       <button
                         type="button"
                         className="linkish"
@@ -1258,6 +1360,16 @@ export function App() {
                         style={{ marginLeft: "0.75rem" }}
                       >
                         Use engine
+                      </button>
+                    ) : null}
+                    {m.kind === "asr" && m.installed ? (
+                      <button
+                        type="button"
+                        className="linkish"
+                        onClick={() => setAudioVerify(true)}
+                        style={{ marginLeft: "0.75rem" }}
+                      >
+                        Enable Audio verify
                       </button>
                     ) : null}
                   </li>

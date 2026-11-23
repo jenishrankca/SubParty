@@ -492,6 +492,25 @@ button.tab.active {
   background: rgba(60, 42, 18, 0.45);
 }
 
+.cue-list li.audio-disagree-item {
+  border-color: rgba(90, 160, 210, 0.55);
+  background: rgba(18, 36, 52, 0.45);
+}
+
+.actions .audio-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  user-select: none;
+  cursor: pointer;
+}
+
+.actions .audio-toggle input {
+  accent-color: var(--accent);
+}
+
 .side h2 .linkish,
 button.linkish {
   background: transparent;

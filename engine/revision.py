@@ -93,6 +93,11 @@ class CueRecord:
     future_horizon_s: float = 120.0
     # Latest media time observed by the pipeline (for maturity clock)
     observed_until: float = 0.0
+    # Phase B audio evidence (never overwrites original_ocr / text_zh source)
+    audio_transcript: str = ""
+    reconciled_zh: str = ""
+    audio_disagreement: bool = False
+    audio_evidence: Any | None = None
 
     @staticmethod
     def new(
@@ -249,4 +254,12 @@ class CueRecord:
             "timing_evidence": self.timing_evidence.as_dict() if self.timing_evidence else None,
             "context_fingerprint": self.context_fingerprint,
             "future_horizon_s": self.future_horizon_s,
+            "audio_transcript": self.audio_transcript,
+            "reconciled_zh": self.reconciled_zh or self.text_zh,
+            "audio_disagreement": self.audio_disagreement,
+            "audio_evidence": (
+                self.audio_evidence.as_dict()
+                if self.audio_evidence is not None and hasattr(self.audio_evidence, "as_dict")
+                else self.audio_evidence
+            ),
         }

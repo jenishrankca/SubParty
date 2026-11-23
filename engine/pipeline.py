@@ -16,6 +16,7 @@ from dialogue_buffer import DialogueBuffer
 from ffmpeg_util import extract_region, probe_duration, probe_size
 from glossary import glossary_for_video
 from ocr import ocr_lines, warm_ocr
+from audio_verify import audio_verify_enabled, verify_cue_records, whisper_available
 from metrics import realtime_factor
 from refine import finalize_cues_at_eof, refine_batch
 from region import SubtitleRegion, default_bottom_region, detect_subtitle_region
@@ -62,6 +63,8 @@ class JobState:
     batch_id: str | None = None
     context_window_s: float = _DEFAULT_CONTEXT_WINDOW_S
     high_accuracy: bool = True
+    audio_verify: bool = False
+    audio_summary: dict[str, Any] = field(default_factory=dict)
     cue_records: list[CueRecord] = field(default_factory=list, repr=False)
     discard_on_cancel: bool = False
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -88,6 +91,7 @@ class JobManager:
         resume_job_id: str | None = None,
         context_window_s: float = _DEFAULT_CONTEXT_WINDOW_S,
         high_accuracy: bool = True,
+        audio_verify: bool | None = None,
     ) -> JobState:
         path = Path(video_path)
         if not path.exists():
@@ -104,6 +108,7 @@ class JobManager:
         job.batch_id = batch_id
         job.context_window_s = max(15.0, float(context_window_s))
         job.high_accuracy = bool(high_accuracy)
+        job.audio_verify = audio_verify_enabled(audio_verify)
         with self._lock:
             self._jobs[job.id] = job
             self._listeners[job.id] = []
@@ -590,6 +595,56 @@ class JobManager:
                 ):
                     self._publish_record(job, writer, rec)
 
+            # Phase B: optional audio verification (never overwrites OCR source)
+            if job.audio_verify and job.cue_records:
+                if not whisper_available():
+                    job.audio_summary = {
+                        "ok": False,
+                        "error": "faster-whisper not installed",
+                        "disagreements": 0,
+                    }
+                    self._emit(job, {"type": "audio", "audio": job.audio_summary})
+                else:
+                    self._emit(
+                        job,
+                        {
+                            "type": "status",
+                            "status": "running",
+                            "progress": job.progress,
+                            "note": "audio-verify",
+                        },
+                    )
+                    try:
+
+                        def _tr(zh: str) -> str:
+                            return dial_ctx.translate(zh, compare_candidates=True) or zh
+
+                        summary = verify_cue_records(
+                            job.cue_records,
+                            video_path=job.video_path,
+                            translate_fn=_tr,
+                        )
+                        job.audio_summary = summary
+                        for rec in job.cue_records:
+                            self._publish_record(job, writer, rec)
+                        self._emit(
+                            job,
+                            {
+                                "type": "audio",
+                                "audio": {
+                                    "ok": summary.get("ok"),
+                                    "disagreements": summary.get("disagreements"),
+                                    "segments": summary.get("segments"),
+                                    "model_size": summary.get("model_size"),
+                                    "engine": summary.get("engine"),
+                                },
+                            },
+                        )
+                    except Exception as exc:
+                        logger.exception("audio verify failed")
+                        job.audio_summary = {"ok": False, "error": str(exc), "disagreements": 0}
+                        self._emit(job, {"type": "audio", "audio": job.audio_summary})
+
             processing_s = time.perf_counter() - wall_t0
             rtf = realtime_factor(processing_s, duration)
             job.status = "done"
@@ -607,6 +662,8 @@ class JobManager:
                     "rtf": round(rtf, 4) if rtf is not None else None,
                     "live_latency_s": round(job.live_lag, 3),
                     "context_window_s": job.context_window_s,
+                    "audio_verify": job.audio_verify,
+                    "audio": job.audio_summary or None,
                 },
             )
         except Exception as exc:

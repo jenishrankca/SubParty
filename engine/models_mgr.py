@@ -102,6 +102,24 @@ def list_models() -> list[dict[str, Any]]:
             ),
         }
     )
+
+    from audio_verify import WHISPER_MODEL_ID, WHISPER_SIZE, whisper_available
+
+    models.append(
+        {
+            "id": WHISPER_MODEL_ID,
+            "name": f"faster-whisper {WHISPER_SIZE} (Chinese ASR)",
+            "kind": "asr",
+            "installed": whisper_available(),
+            "engine": "audio",
+            "optional": True,
+            "size_hint": "~500 MB",
+            "notes": (
+                "Phase B audio verify. Fits 6GB VRAM / 16GB RAM (CUDA float16 or CPU int8). "
+                "Enable Audio verify on Process or SUBPARTY_AUDIO_VERIFY=1."
+            ),
+        }
+    )
     return models
 
 
@@ -155,4 +173,8 @@ def ensure_model(model_id: str) -> dict[str, Any]:
         if not QwenEngine().available():
             raise RuntimeError("Qwen download finished but weights not detected")
         return next(m for m in list_models() if m["id"] == QWEN_LOCAL_NAME)
+    if mid in {"faster-whisper-small", "faster-whisper", "whisper-small", "audio-asr"}:
+        from audio_verify import ensure_whisper_model
+
+        return ensure_whisper_model()
     raise ValueError(f"Unknown model: {model_id}")
