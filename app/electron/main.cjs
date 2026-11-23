@@ -55,8 +55,39 @@ function resolvePython() {
   return process.env.SUBPARTY_PYTHON || "python";
 }
 
+function freeEnginePort() {
+  // Stale sidecars (e.g. v0.2) on 18765 cause Process → /engines/select 404.
+  try {
+    if (process.platform === "win32") {
+      const { execSync } = require("child_process");
+      const out = execSync(`netstat -ano | findstr :${ENGINE_PORT}`, {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      const pids = new Set();
+      for (const line of out.split(/\r?\n/)) {
+        if (!/LISTENING/i.test(line)) continue;
+        const parts = line.trim().split(/\s+/);
+        const pid = parts[parts.length - 1];
+        if (pid && /^\d+$/.test(pid) && pid !== "0") pids.add(pid);
+      }
+      for (const pid of pids) {
+        try {
+          execSync(`taskkill /PID ${pid} /F`, { windowsHide: true, stdio: "ignore" });
+          console.log(`[engine] killed stale pid ${pid} on :${ENGINE_PORT}`);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  } catch {
+    /* nothing listening */
+  }
+}
+
 function startEngine() {
   if (engineProc) return;
+  freeEnginePort();
   const py = resolvePython();
   const engineDir = path.join(projectRoot(), "engine");
   const mainPy = path.join(engineDir, "main.py");
@@ -90,11 +121,32 @@ function waitForEngine(timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
     const tick = () => {
       const req = http.get(`${ENGINE_URL}/health`, (res) => {
-        res.resume();
-        if (res.statusCode === 200) {
+        let raw = "";
+        res.on("data", (c) => {
+          raw += c;
+        });
+        res.on("end", () => {
+          if (res.statusCode !== 200) {
+            retry();
+            return;
+          }
+          try {
+            const body = JSON.parse(raw);
+            const ver = String(body.version || "");
+            // Require 2.x accuracy engine; otherwise kill and keep waiting for our spawn
+            if (ver.startsWith("0.")) {
+              console.error(`[engine] outdated sidecar ${ver} still on port — reclaiming`);
+              freeEnginePort();
+              if (!engineProc) startEngine();
+              retry();
+              return;
+            }
+          } catch {
+            /* accept opaque 200 */
+          }
           readToken();
           resolve(true);
-        } else retry();
+        });
       });
       req.on("error", retry);
       function retry() {

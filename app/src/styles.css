@@ -275,15 +275,92 @@ button.tab.active {
 }
 
 .meta {
-  font-size: 0.9rem;
+  font-size: 0.86rem;
   color: var(--muted);
-  word-break: break-all;
-  margin-bottom: 1rem;
+  margin: 0.75rem 0 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.meta.compact > div {
+  display: grid;
+  grid-template-columns: 5.2rem 1fr;
+  gap: 0.35rem 0.55rem;
+  align-items: baseline;
+}
+
+.meta.compact > div span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.meta.compact > div.path strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta.compact .live-stats {
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.75rem;
+  grid-template-columns: none;
+  padding-top: 0.15rem;
+}
+
+.meta.compact .live-stats span {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.8rem;
+  color: var(--text);
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.15rem 0.45rem;
 }
 
 .meta strong {
   color: var(--text);
   font-weight: 600;
+}
+
+.status-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg1);
+  margin: 0.55rem 0 0.55rem;
+}
+
+.status-banner strong {
+  font-size: 0.95rem;
+  color: var(--text);
+  text-transform: capitalize;
+}
+
+.status-banner span {
+  font-size: 0.84rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.status-banner.live {
+  border-color: rgba(62, 207, 142, 0.45);
+}
+
+.status-banner.error {
+  border-color: rgba(232, 93, 93, 0.65);
+  background: rgba(60, 22, 22, 0.45);
+}
+
+.status-banner.error span {
+  color: #f0b4b4;
 }
 
 .progress-row {

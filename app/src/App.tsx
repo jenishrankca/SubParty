@@ -3,8 +3,10 @@ import {
   apiBase,
   apiGet,
   apiSend,
+  apiSendOptional,
   apiToken,
   eventsUrl,
+  formatApiError,
   setApiBase,
   setApiToken,
   type Cue,
@@ -46,6 +48,7 @@ export function App() {
   const [playTime, setPlayTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [engineOk, setEngineOk] = useState<boolean | null>(null);
+  const [engineVersion, setEngineVersion] = useState<string | null>(null);
   const [avgSlotMs, setAvgSlotMs] = useState<number | null>(null);
   const [liveLag, setLiveLag] = useState<number | null>(null);
   const [bufferAhead, setBufferAhead] = useState<number | null>(null);
@@ -102,11 +105,26 @@ export function App() {
       try {
         const res = await fetch(`${engineUrl}/health`);
         if (!cancelled) setEngineOk(res.ok);
-        if (res.ok && apiToken()) {
-          void refreshMeta();
+        if (res.ok) {
+          try {
+            const body = (await res.json()) as { version?: string; mode?: string };
+            if (!cancelled) setEngineVersion(body.version || null);
+            const ver = String(body.version || "0");
+            if (ver.startsWith("0.") && !cancelled) {
+              setError(
+                `Engine ${ver} is outdated (need 2.0+). Quit SubParty completely and restart with npm run dev so the new sidecar binds port 18765.`
+              );
+            }
+          } catch {
+            /* ignore */
+          }
+          if (apiToken()) void refreshMeta();
         }
       } catch {
-        if (!cancelled) setEngineOk(false);
+        if (!cancelled) {
+          setEngineOk(false);
+          setEngineVersion(null);
+        }
       }
     };
     void ping();
@@ -163,7 +181,7 @@ export function App() {
       setGlossaryCount(Object.keys(g.terms || {}).length);
       setSeriesId(g.series_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
     }
   }
 
@@ -202,7 +220,7 @@ export function App() {
         await loadGlossary(paths[0]);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
     } finally {
       setBusy(false);
     }
@@ -233,10 +251,12 @@ export function App() {
     setCues([]);
     setCueCount(0);
     setProgress(0);
+    setStatus("queued");
     esRef.current?.close();
     const startAt = videoRef.current?.currentTime ?? 0;
     try {
-      await apiSend("/engines/select", "POST", { engine_id: engineId });
+      // Optional on older sidecars — never block Process on /engines/select 404
+      await apiSendOptional("/engines/select", "POST", { engine_id: engineId });
       const job = await apiSend<{
         id: string;
         srt_path: string;
@@ -268,7 +288,7 @@ export function App() {
       }
     } catch (err) {
       setStatus("error");
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
     } finally {
       setBusy(false);
     }
@@ -378,7 +398,7 @@ export function App() {
       setBatchNote(`Exported: ${Object.keys(res.paths).join(", ")}`);
       if (res.paths.en_srt) setSrtPath(res.paths.en_srt);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
     } finally {
       setBusy(false);
     }
@@ -426,7 +446,7 @@ export function App() {
       await apiSend("/models/ensure", "POST", { model_id: id });
       await refreshMeta();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
     } finally {
       setBusy(false);
     }
@@ -455,7 +475,7 @@ export function App() {
       subscribe(job.id);
       await loadGlossary(job.video_path);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
     } finally {
       setBusy(false);
     }
@@ -576,87 +596,86 @@ export function App() {
 
           {panel === "job" ? (
             <>
-              <h2>Job</h2>
-              <div className="meta">
-                <div>
-                  Engine: <strong>{engineOk === null ? "…" : engineOk ? "ready" : "offline"}</strong>
-                  {apiToken() ? " · secured" : ""}
-                </div>
-                <div>
-                  Translator: <strong>{engineId}</strong>
-                </div>
-                <div>
-                  Video: <strong>{videoPath || "—"}</strong>
-                </div>
-                <div>
-                  SRT: <strong>{srtPath || "—"}</strong>
-                </div>
-                {jobId ? (
-                  <div>
-                    Job: <strong>{jobId.slice(0, 8)}</strong>
-                  </div>
-                ) : null}
-                {avgSlotMs != null ? (
-                  <div>
-                    Slot: <strong>{avgSlotMs} ms avg</strong>
-                  </div>
-                ) : null}
-                {sampleInterval != null && status === "running" ? (
-                  <div>
-                    Sample: <strong>every {sampleInterval.toFixed(1)}s</strong>
-                  </div>
-                ) : null}
-                {bufferAhead != null && status === "running" ? (
-                  <div>
-                    Buffer ahead: <strong>{bufferAhead.toFixed(1)}s</strong>
-                  </div>
-                ) : null}
-                {liveLag != null && status === "running" ? (
-                  <div>
-                    Live lag: <strong>{liveLag.toFixed(1)}s</strong>
-                  </div>
-                ) : null}
-                {seriesId ? (
-                  <div>
-                    Series: <strong>{seriesId}</strong>
-                    {glossaryCount != null ? ` · ${glossaryCount} terms` : ""}
-                  </div>
-                ) : null}
-                {regionLabel ? (
-                  <div>
-                    Sub region: <strong>{regionLabel}</strong>
-                  </div>
-                ) : null}
-                {batchNote ? (
-                  <div>
-                    Note: <strong>{batchNote}</strong>
-                  </div>
-                ) : null}
+              <div className={`status-banner${error ? " error" : status === "running" ? " live" : ""}`}>
+                <strong>
+                  {status === "idle" ? "Idle" : status}
+                  {cueCount ? ` · ${cueCount} cues` : ""}
+                  {status === "running" || status === "paused" ? ` · ${pct}%` : ""}
+                </strong>
+                <span>
+                  {error
+                    ? error
+                    : status === "running"
+                      ? "Live OCR — provisional cues refine as context fills."
+                      : status === "paused"
+                        ? "Paused at playhead."
+                        : status === "done"
+                          ? "Done. Use Export for bilingual SRT / VTT / ASS."
+                          : status === "error"
+                            ? "Fix the issue above, then Process again."
+                            : "Pick a video, then Process."}
+                </span>
               </div>
 
-              <div className="progress-row">
-                <span>
-                  {status === "idle" ? "Idle" : status} · {cueCount} cues
-                </span>
-                <span>
-                  {pct}%
-                  {duration > 0 ? ` · ${formatTime(duration)}` : ""}
-                </span>
-              </div>
               <div className="bar">
                 <i style={{ width: `${pct}%` }} />
               </div>
 
-              <div className={`status${error ? " error" : ""}`}>
-                {error
-                  ? error
-                  : status === "running"
-                    ? "Adaptive live OCR with context, glossary, and selectable engines."
-                    : status === "paused"
-                      ? "Paused — resume to continue from the playhead."
-                      : status === "done"
-                        ? "Done. Export bilingual SRT / VTT / ASS from the toolbar."
-                        : `Base ${apiBase()}`}
+              <div className="meta compact">
+                <div>
+                  <span>Engine</span>
+                  <strong>
+                    {engineOk === null ? "…" : engineOk ? "ready" : "offline"}
+                    {engineVersion ? ` ${engineVersion}` : ""}
+                    {apiToken() ? " · secured" : ""}
+                  </strong>
+                </div>
+                <div>
+                  <span>Translator</span>
+                  <strong>{engineId}</strong>
+                </div>
+                <div className="path">
+                  <span>Video</span>
+                  <strong title={videoPath || undefined}>
+                    {videoPath ? videoPath.split(/[/\\]/).pop() : "—"}
+                  </strong>
+                </div>
+                <div className="path">
+                  <span>SRT</span>
+                  <strong title={srtPath || undefined}>
+                    {srtPath ? srtPath.split(/[/\\]/).pop() : "—"}
+                  </strong>
+                </div>
+                {(status === "running" || status === "paused") && (
+                  <div className="live-stats">
+                    {liveLag != null ? <span>lag {liveLag.toFixed(1)}s</span> : null}
+                    {bufferAhead != null ? <span>buf {bufferAhead.toFixed(1)}s</span> : null}
+                    {sampleInterval != null ? <span>every {sampleInterval.toFixed(1)}s</span> : null}
+                    {avgSlotMs != null ? <span>{avgSlotMs} ms</span> : null}
+                  </div>
+                )}
+                {seriesId ? (
+                  <div>
+                    <span>Series</span>
+                    <strong>
+                      {seriesId}
+                      {glossaryCount != null ? ` · ${glossaryCount} terms` : ""}
+                      {regionLabel ? ` · ${regionLabel}` : ""}
+                    </strong>
+                  </div>
+                ) : null}
+                {batchNote ? (
+                  <div>
+                    <span>Note</span>
+                    <strong>{batchNote}</strong>
+                  </div>
+                ) : null}
+                {jobId ? (
+                  <div>
+                    <span>Job</span>
+                    <strong>{jobId.slice(0, 8)}</strong>
+                  </div>
+                ) : null}
               </div>
 
               {recovery.length ? (
