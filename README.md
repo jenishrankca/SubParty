@@ -77,6 +77,14 @@ Series glossary lives at `{video_folder}/.subparty/{series_id}.json` (folder nam
 
 Sample hardsub clip: `samples\demo_zh_hardsub.mp4`.
 
+## Tests
+
+```bat
+c:\Users\jenis\App\SubParty\scripts\run-engine-tests.cmd
+```
+
+Covers SRT overlap replacement, adaptive tick picking, region matrix (top/mid/bottom × 480/720/1080), OCR confidence helpers, and a short synth hardsub e2e (plus `samples\demo_zh_hardsub.mp4` when present).
+
 ## Portable notes
 
 - Run `scripts\download-ffmpeg.cmd` once so `bin\ffmpeg.exe` / `ffprobe.exe` exist (not committed).
