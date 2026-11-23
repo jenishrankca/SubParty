@@ -1,0 +1,272 @@
+{
+  "ok": true,
+  "stage": 1,
+  "created_utc": "20261123T072107Z",
+  "branch_note": "cursor/subparty-engine-bench-7239 \u2014 baseline only; Live stays on main",
+  "decode_path": {
+    "module": "engine/ffmpeg_util.py",
+    "function": "_run_ffmpeg_frame",
+    "pattern": "subprocess per frame: ffmpeg -ss T -i video -frames:v 1 -vf crop+scale -y out.png",
+    "to_beat_next": "PyAV persistent demux/decode adapter"
+  },
+  "environment": {
+    "python": "3.13.5",
+    "cwd": "C:\\Users\\jenis\\App\\SubParty\\engine"
+  },
+  "phases": {
+    "warm_ocr_s": 0.8,
+    "decode_ocr": [
+      {
+        "video": "samples\\the-weird-games-5min.mp4",
+        "duration_s": 300.03,
+        "size": {
+          "w": 1280,
+          "h": 720
+        },
+        "scale_width": 320,
+        "timestamps": [
+          0.5,
+          33.726,
+          66.952,
+          100.178,
+          133.404,
+          166.63,
+          199.856,
+          233.081,
+          266.307,
+          299.533
+        ],
+        "decode": {
+          "n": 10,
+          "mean_ms": 301.7,
+          "p50_ms": 238.8,
+          "p95_ms": 550.9,
+          "min_ms": 79.8,
+          "max_ms": 551.2
+        },
+        "ocr": {
+          "n": 10,
+          "mean_ms": 1710.8,
+          "p50_ms": 1679.0,
+          "p95_ms": 2012.2,
+          "min_ms": 1340.1,
+          "max_ms": 2058.2
+        },
+        "combined": {
+          "n": 10,
+          "mean_ms": 2012.5,
+          "p50_ms": 1886.3,
+          "p95_ms": 2556.0,
+          "min_ms": 1662.9,
+          "max_ms": 2608.6
+        },
+        "ocr_nonempty": 4,
+        "ocr_samples": [
+          "",
+          "\u5341\u6b7b\u65e0\u751f\u7684S\u7ea7",
+          "",
+          "\u5c0f\u4e56\u5b9d\u522b\u6015\u54e6",
+          "",
+          "",
+          "\u6050\u6016\u6e38\u620f\u91cc\u7684\u4e0b\u5348\u8336",
+          "\u6211\u8fd8\u4ee5\u4e3a\u8981\u6211\u53bb\u6253\u626b\u5395\u6240\u5462"
+        ],
+        "decode_path": "per-frame ffmpeg subprocess (_run_ffmpeg_frame)"
+      },
+      {
+        "video": "samples\\demo_zh_hardsub.mp4",
+        "duration_s": 8.0,
+        "size": {
+          "w": 1280,
+          "h": 720
+        },
+        "scale_width": 320,
+        "timestamps": [
+          0.5,
+          1.278,
+          2.056,
+          2.833,
+          3.611,
+          4.389,
+          5.167,
+          5.944,
+          6.722,
+          7.5
+        ],
+        "decode": {
+          "n": 10,
+          "mean_ms": 419.8,
+          "p50_ms": 487.0,
+          "p95_ms": 558.5,
+          "min_ms": 84.3,
+          "max_ms": 576.4
+        },
+        "ocr": {
+          "n": 10,
+          "mean_ms": 1860.0,
+          "p50_ms": 1867.7,
+          "p95_ms": 2116.2,
+          "min_ms": 1585.9,
+          "max_ms": 2220.9
+        },
+        "combined": {
+          "n": 10,
+          "mean_ms": 2279.8,
+          "p50_ms": 2296.4,
+          "p95_ms": 2475.2,
+          "min_ms": 2072.5,
+          "max_ms": 2476.6
+        },
+        "ocr_nonempty": 8,
+        "ocr_samples": [
+          "\u4f60\u597d\u4e16\u754c",
+          "\u4f60\u597d\u4e16\u754c",
+          "",
+          "\u6b22\u8fce\u4f7f\u7528\u5b57\u5e55\u6d3e\u5bf9",
+          "\u6b22\u8fce\u4f7f\u7528\u5b57\u5e55\u6d3e\u5bf9",
+          "\u6b22\u8fce\u4f7f\u7528\u5b57\u5e55\u6d3e\u5bf9",
+          "\u8fd9\u662f\u70e7\u5f55\u5b57\u5e55\u6d4b\u8bd5",
+          "\u8fd9\u662f\u70e7\u5f55\u5b57\u5e55\u6d4b\u8bd5"
+        ],
+        "decode_path": "per-frame ffmpeg subprocess (_run_ffmpeg_frame)"
+      },
+      {
+        "video": "samples\\demo_watermark_junk.mp4",
+        "duration_s": 8.0,
+        "size": {
+          "w": 1280,
+          "h": 720
+        },
+        "scale_width": 320,
+        "timestamps": [
+          0.5,
+          1.278,
+          2.056,
+          2.833,
+          3.611,
+          4.389,
+          5.167,
+          5.944,
+          6.722,
+          7.5
+        ],
+        "decode": {
+          "n": 10,
+          "mean_ms": 423.4,
+          "p50_ms": 456.8,
+          "p95_ms": 511.4,
+          "min_ms": 99.6,
+          "max_ms": 513.7
+        },
+        "ocr": {
+          "n": 10,
+          "mean_ms": 1808.8,
+          "p50_ms": 1844.9,
+          "p95_ms": 1952.2,
+          "min_ms": 1578.2,
+          "max_ms": 1981.8
+        },
+        "combined": {
+          "n": 10,
+          "mean_ms": 2232.2,
+          "p50_ms": 2216.4,
+          "p95_ms": 2463.2,
+          "min_ms": 1951.9,
+          "max_ms": 2490.5
+        },
+        "ocr_nonempty": 8,
+        "ocr_samples": [
+          "\u4f60\u597d\u4e16\u754c",
+          "\u4f60\u597d\u4e16\u754c",
+          "",
+          "\u6b22\u8fce\u4f7f\u7528\u5b57\u5e55\u6d3e\u5bf9",
+          "\u6b22\u8fce\u4f7f\u7528\u5b57\u5e55\u6d3e\u5bf9",
+          "\u6b22\u8fce\u4f7f\u7528\u5b57\u5e55\u6d3e\u5bf9",
+          "\u8fd9\u662f\u70e7\u5f55\u5b57\u5e55\u6d4b\u8bd5",
+          "\u8fd9\u662f\u70e7\u5f55\u5b57\u5e55\u6d4b\u8bd5"
+        ],
+        "decode_path": "per-frame ffmpeg subprocess (_run_ffmpeg_frame)"
+      }
+    ],
+    "live_ready": {
+      "ok": true,
+      "mode": "live",
+      "ready_s": 8.67,
+      "cancelled_after_ready": true,
+      "final": {
+        "status": "running",
+        "progress": 0.01,
+        "cue_count": 0,
+        "buffer_ahead": 3.0,
+        "live_lag": -3.0,
+        "sample_interval": 2.0,
+        "wall_s": 8.67,
+        "ready_s": 8.67
+      },
+      "cues_preview": [],
+      "create_to_end_s": 8.69,
+      "video": "samples\\the-weird-games-5min.mp4",
+      "live_mode": true
+    },
+    "asr": [
+      {
+        "ok": false,
+        "skipped": true,
+        "reason": "asr runtime error: TypeError: open() got an unexpected keyword argument 'metadata_errors'",
+        "video": "samples\\demo_zh_hardsub.mp4",
+        "audio_s": 8.0,
+        "note": "Package available; inference failed \u2014 pin av/faster-whisper or use audio_verify path later"
+      },
+      {
+        "ok": false,
+        "skipped": true,
+        "reason": "asr runtime error: TypeError: open() got an unexpected keyword argument 'metadata_errors'",
+        "video": "samples\\the-weird-games-5min.mp4",
+        "audio_s": 12.0,
+        "note": "Package available; inference failed \u2014 pin av/faster-whisper or use audio_verify path later"
+      }
+    ],
+    "quality_demos": [
+      {
+        "ok": true,
+        "mode": "quality",
+        "wall_s": 79.64,
+        "rtf": 9.9554,
+        "cue_count": 3,
+        "status": "done",
+        "duration_s": 8.0,
+        "video": "samples\\\\demo_zh_hardsub.mp4",
+        "live_mode": false,
+        "note": "captured in prior full run same session; fine probes + region detect"
+      },
+      {
+        "ok": true,
+        "mode": "quality",
+        "wall_s": 89.45,
+        "rtf": 11.1806,
+        "cue_count": 3,
+        "status": "done",
+        "duration_s": 8.0,
+        "video": "samples\\\\demo_watermark_junk.mp4",
+        "live_mode": false,
+        "note": "captured in prior full run same session"
+      }
+    ]
+  },
+  "summary": {
+    "decode_path": "per-frame FFmpeg subprocess",
+    "weird_games_decode_p50_ms": 238.8,
+    "weird_games_ocr_p50_ms": 1679.0,
+    "weird_games_combo_p50_ms": 1886.3,
+    "live_ready_s": 8.67,
+    "next_pr": "PyAV persistent decode adapter (beat per-frame FFmpeg)",
+    "quality_demo_zh_hardsub_wall_s": 79.64,
+    "quality_demo_zh_hardsub_rtf": 9.9554,
+    "quality_demo_zh_hardsub_cues": 3,
+    "quality_demo_watermark_junk_wall_s": 89.45,
+    "quality_demo_watermark_junk_rtf": 11.1806,
+    "quality_demo_watermark_junk_cues": 3,
+    "asr_status": "skipped: PyAV metadata_errors TypeError with faster-whisper",
+    "geeklink_ocr_set": "deferred (optional; not pulled in stage 1)"
+  }
+}
