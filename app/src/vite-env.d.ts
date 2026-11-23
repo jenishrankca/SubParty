@@ -18,6 +18,7 @@ interface EngineFetchResult {
 interface SubPartyApi {
   pickVideo: () => Promise<string | null>;
   pickVideos: () => Promise<string[]>;
+  pickJson?: () => Promise<string | null>;
   openFolder: (targetPath: string) => Promise<void>;
   engineUrl: () => Promise<string>;
   engineToken: () => Promise<string>;

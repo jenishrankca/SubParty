@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("subparty", {
   pickVideo: () => ipcRenderer.invoke("pick-video"),
   pickVideos: () => ipcRenderer.invoke("pick-videos"),
+  pickJson: () => ipcRenderer.invoke("pick-json"),
   openFolder: (targetPath) => ipcRenderer.invoke("open-folder", targetPath),
   engineUrl: () => ipcRenderer.invoke("engine-url"),
   engineToken: () => ipcRenderer.invoke("engine-token"),

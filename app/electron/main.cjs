@@ -378,6 +378,16 @@ ipcMain.handle("pick-videos", async () => {
   return result.filePaths;
 });
 
+ipcMain.handle("pick-json", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Pick annotated gold JSON for QA",
+    properties: ["openFile"],
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  return result.filePaths[0];
+});
+
 ipcMain.handle("open-folder", async (_e, targetPath) => {
   if (!targetPath) return;
   const dir =

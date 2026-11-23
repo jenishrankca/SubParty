@@ -181,6 +181,12 @@ export function App() {
   const [nameSuggestions, setNameSuggestions] = useState<Array<{ zh: string; en: string; count: string }>>(
     []
   );
+  const [goldPath, setGoldPath] = useState<string | null>(null);
+  const [qaReportPath, setQaReportPath] = useState<string | null>(null);
+  const [characters, setCharacters] = useState<
+    Array<{ zh: string; en: string; role?: string; notes?: string; aliases?: string[] }>
+  >([]);
+  const [mergeStart, setMergeStart] = useState<number | null>(null);
   const [recovery, setRecovery] = useState<Array<Record<string, unknown>>>([]);
   const [audioVerify, setAudioVerify] = useState(false);
   const [audioReady, setAudioReady] = useState<AudioVerifyStatus | null>(null);
@@ -386,12 +392,138 @@ export function App() {
     }
   }
 
-  async function refreshQa() {
+  async function refreshQa(opts?: { exportHtml?: boolean; gold?: string | null }) {
     if (!jobId) return;
     setBusy(true);
     try {
-      const res = await apiGet<Record<string, unknown>>(`/jobs/${jobId}/qa`);
+      const gold = opts?.gold ?? goldPath;
+      const exportHtml = opts?.exportHtml ?? false;
+      let res: Record<string, unknown>;
+      if (gold || exportHtml) {
+        res = await apiSend<Record<string, unknown>>(`/jobs/${jobId}/qa`, "POST", {
+          gold_path: gold || undefined,
+          export_html: exportHtml,
+        });
+      } else {
+        res = await apiGet<Record<string, unknown>>(`/jobs/${jobId}/qa`);
+      }
       setQaReport(res);
+      if (typeof res.report_html === "string") setQaReportPath(res.report_html);
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function pickGoldJson() {
+    if (!window.subparty.pickJson) {
+      setError("Update the desktop shell to pick gold JSON files.");
+      return;
+    }
+    const picked = await window.subparty.pickJson();
+    if (!picked) return;
+    setGoldPath(picked);
+    void refreshQa({ gold: picked });
+  }
+
+  async function loadCharacters() {
+    const sid = glossary?.series_id || seriesId;
+    if (!sid) return;
+    try {
+      const res = await apiGet<{ characters: Array<{ zh: string; en: string; role?: string; notes?: string }> }>(
+        `/characters/${encodeURIComponent(sid)}`
+      );
+      setCharacters(res.characters || []);
+    } catch {
+      /* optional */
+    }
+  }
+
+  async function saveCharacterFromSuggestion(zh: string, en: string) {
+    const sid = glossary?.series_id || seriesId;
+    if (!sid || !zh) return;
+    setBusy(true);
+    try {
+      const res = await apiSend<{ characters: Array<{ zh: string; en: string }> }>("/characters", "POST", {
+        series_id: sid,
+        zh,
+        en: en || gEn || zh,
+        role: "suggested",
+        sync_glossary: true,
+        video_path: videoPath,
+      });
+      setCharacters(res.characters || []);
+      if (videoPath) void loadGlossary(videoPath);
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function splitEditCue() {
+    if (!jobId || !editCue) return;
+    setBusy(true);
+    try {
+      const res = await apiSend<{ cues: Cue[] }>(`/jobs/${jobId}/cues/split`, "POST", {
+        cue_id: editCue.cue_id,
+        start: editCue.start,
+      });
+      setCues(res.cues || []);
+      setCueCount((res.cues || []).length);
+      setEditCue(null);
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function mergeWithEditCue(otherStart: number) {
+    if (!jobId || !editCue) return;
+    setBusy(true);
+    try {
+      const res = await apiSend<{ cues: Cue[] }>(`/jobs/${jobId}/cues/merge`, "POST", {
+        cue_id_a: editCue.cue_id,
+        start_a: editCue.start,
+        start_b: otherStart,
+      });
+      setCues(res.cues || []);
+      setCueCount((res.cues || []).length);
+      setEditCue(null);
+      setMergeStart(null);
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retryFailedBatch() {
+    if (!batchId) return;
+    setBusy(true);
+    try {
+      await apiSend(`/jobs/batch/${batchId}/retry`, "POST", { engine_id: engineId });
+      await refreshBatchStatus(batchId);
+      setBatchNote(`Batch ${batchId.slice(0, 8)} · retry queued`);
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportBatchAll() {
+    if (!batchId) return;
+    setBusy(true);
+    try {
+      const res = await apiSend<{ exported: Array<{ paths?: Record<string, string>; error?: string }> }>(
+        `/jobs/batch/${batchId}/export`,
+        "POST",
+        { bilingual_srt: true, vtt: true, ass: true }
+      );
+      setBatchNote(`Batch export · ${res.exported?.length || 0} jobs`);
     } catch (err) {
       setError(formatApiError(err));
     } finally {
@@ -1015,7 +1147,10 @@ export function App() {
                 onClick={() => {
                   setPanel(p);
                   if (p === "qa") void refreshQa();
-                  if (p === "glossary") void refreshNameSuggestions();
+                  if (p === "glossary") {
+                    void refreshNameSuggestions();
+                    void loadCharacters();
+                  }
                   if (p === "batch") void refreshBatchStatus();
                 }}
               >
@@ -1301,6 +1436,29 @@ export function App() {
                         >
                           Use
                         </button>
+                        <button
+                          type="button"
+                          className="linkish"
+                          onClick={() => void saveCharacterFromSuggestion(s.zh, s.en || "")}
+                        >
+                          Sheet
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
+              {characters.length ? (
+                <>
+                  <h2>Character sheet</h2>
+                  <ul className="cue-list">
+                    {characters.map((c) => (
+                      <li key={c.zh}>
+                        <div className="en">
+                          {c.zh} → {c.en || "—"}
+                          {c.role ? ` · ${c.role}` : ""}
+                        </div>
+                        {c.notes ? <div className="zh">{c.notes}</div> : null}
                       </li>
                     ))}
                   </ul>
@@ -1343,7 +1501,31 @@ export function App() {
                 <button type="button" className="linkish" onClick={() => void refreshQa()} disabled={!jobId || busy}>
                   Refresh
                 </button>
+                <button type="button" className="linkish" onClick={() => void pickGoldJson()} disabled={!jobId || busy}>
+                  Gold JSON
+                </button>
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => void refreshQa({ exportHtml: true })}
+                  disabled={!jobId || busy}
+                >
+                  Export HTML
+                </button>
               </h2>
+              {goldPath ? (
+                <div className="t" style={{ marginBottom: "0.5rem", opacity: 0.85 }}>
+                  Gold: {goldPath.split(/[/\\]/).pop()}
+                </div>
+              ) : null}
+              {qaReportPath ? (
+                <div className="t" style={{ marginBottom: "0.5rem" }}>
+                  Report:{" "}
+                  <button type="button" className="linkish" onClick={() => void window.subparty.openFolder(qaReportPath)}>
+                    {qaReportPath.split(/[/\\]/).pop()}
+                  </button>
+                </div>
+              ) : null}
               {!jobId ? (
                 <div className="empty" style={{ padding: "0.5rem 0" }}>
                   Process a job to score CER / timing / multimodal QA.
@@ -1452,6 +1634,12 @@ export function App() {
                   disabled={!batchId || busy}
                 >
                   Refresh
+                </button>
+                <button type="button" className="linkish" onClick={() => void retryFailedBatch()} disabled={!batchId || busy}>
+                  Retry failed
+                </button>
+                <button type="button" className="linkish" onClick={() => void exportBatchAll()} disabled={!batchId || busy}>
+                  Export all
                 </button>
               </h2>
               {!batchId ? (
@@ -1584,10 +1772,27 @@ export function App() {
                     <button type="button" onClick={() => void saveEditCue()}>
                       Save cue
                     </button>
+                    <button type="button" className="secondary" onClick={() => void splitEditCue()} disabled={busy}>
+                      Split
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => setMergeStart(editCue.start)}
+                      disabled={busy}
+                      title="Then click Merge on another cue"
+                    >
+                      Mark merge
+                    </button>
                     <button type="button" className="secondary" onClick={() => setEditCue(null)}>
                       Cancel
                     </button>
                   </div>
+                  {mergeStart != null ? (
+                    <div className="t" style={{ marginTop: "0.35rem" }}>
+                      Merge marked @ {formatTime(mergeStart)} — pick another cue’s Merge.
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               <ul className="cue-list">
@@ -1630,6 +1835,15 @@ export function App() {
                       >
                         Jump
                       </button>
+                      {mergeStart != null && Math.abs(mergeStart - c.start) > 0.05 ? (
+                        <button
+                          type="button"
+                          className="linkish"
+                          onClick={() => void mergeWithEditCue(c.start)}
+                        >
+                          Merge
+                        </button>
+                      ) : null}
                     </div>
                     <div className="en">{c.text_en}</div>
                     <div className="zh">{c.text_zh}</div>

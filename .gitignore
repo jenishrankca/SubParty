@@ -26,6 +26,9 @@ data/engine.token
 data/glossary/
 data/jobs/
 data/models/
+data/batches/
+data/characters/
+data/reports/
 # Keep directory placeholders if committed
 !data/.gitkeep
 !data/models/.gitkeep

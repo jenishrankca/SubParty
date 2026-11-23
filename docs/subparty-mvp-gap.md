@@ -1,37 +1,22 @@
 # SubParty MVP — Gap analysis (stages 1–9 vs `main`)
 
 **Date:** 2026-11-23 (updated)  
-**Baseline tip:** `main` @ `86e85d5`  
+**Baseline tip:** `main` (push after High polish)  
 **Spec:** [subparty-mvp-spec.md](./subparty-mvp-spec.md) · **Roadmap:** [subparty-roadmap.md](./subparty-roadmap.md)
-
-**Method:** Evidence engines and measurable benches first; High stages as incremental product slices.
 
 | Stage | Priority | Verdict |
 | --- | --- | --- |
-| 1 OCR + timing | Critical | **Landed** (+ suite polish) |
-| 2 Audio + Chinese ASR | Critical | **Landed** (word ts + ASR RTF) |
-| 3 OCR/audio reconcile | Critical | **Landed** |
-| 4 Context translate + refine | Critical | **Landed** |
-| 5 Frame + speech-aligned timing | Critical | **Landed** (word-aware align) |
-| 6 Professional editor | High | **Partial → slice landed** |
-| 7 Independent QA + benches | High | **Partial → slice landed** |
-| 8 Glossary / series memory | High | **Partial → slice landed** |
-| 9 Batch + production workflow | High | **Partial → slice landed** |
+| 1–5 Critical | Critical | **Landed** |
+| 6 Professional editor | High | **Landed** (split/merge + evidence editor) |
+| 7 Independent QA | High | **Landed** (gold JSON + HTML/JSON export) |
+| 8 Glossary / series / characters | High | **Landed** (character sheets) |
+| 9 Batch production | High | **Landed** (durable queue, retry, export-all) |
 
 ---
 
-## Critical (closed)
+## Critical — closed
 
-| Item | Status |
-| --- | --- |
-| CER / ASR CER / timing ms+p95 | Done — `metrics.py` |
-| Revision before/after | Done — ambiguous + suite fixtures |
-| `adopt-audio-ocr-typo` | Done — keeps `original_ocr` |
-| Speech-aligned timing | Done — `speech_align.py` |
-| Broader annotated suite | Done — `fixtures/annotated_suite.json` + `test_annotated_suite.py` |
-| Word timestamps | Done — `transcribe_zh(word_timestamps=True)` → word-aware align |
-| ASR RTF | Done — `asr_rtf_report` + verify summary / metrics |
-| Multimodal scores in metrics | Done — `multimodal_summary` |
+CER / ASR CER / timing ms / revision / speech-align / word timestamps / ASR RTF / annotated suite — see earlier commits.
 
 ```bat
 cd engine
@@ -40,32 +25,27 @@ cd engine
 
 ---
 
-## High stages (first slices)
+## High stages — closed (this pass)
 
-### 6 Editor — landed slice
-- Timeline → **Production editor**: OCR / ASR / reconciled evidence, maturity, prev/next, disagreement highlighting
-
-### 7 QA — landed slice
-- `GET/POST /jobs/{id}/qa` → CER, timing ms, RTF, multimodal, review queue
-- UI **qa** panel
-
-### 8 Glossary / series — landed slice
-- `GET /glossary/series` index · `GET /glossary/suggest` character candidates
-- UI suggestions + all-series memory list
-
-### 9 Batch — landed slice
-- `GET /jobs/batch/{batch_id}` aggregate status
-- UI **batch** panel with progress / per-job rows
+| Item | Status | Notes |
+| --- | --- | --- |
+| Split / merge cues | Done | `cue_ops.py` · `POST .../cues/split|merge` · editor UI |
+| QA gold upload | Done | `gold_path` / `gold_cues` on `/jobs/{id}/qa` · Electron `pickJson` |
+| QA exportable report | Done | HTML + JSON under `data/reports/` (`export_qa_html`) |
+| Character sheets | Done | `characters.py` · `/characters` CRUD · glossary sync · UI sheet |
+| Durable batch queue | Done | `data/batches/{id}.json` · survives restart |
+| Batch retry failed | Done | `POST /jobs/batch/{id}/retry` |
+| Batch export-all | Done | `POST /jobs/batch/{id}/export` |
 
 ```bat
-.venv\Scripts\python.exe -m unittest tests.test_mvp_high -v
+.venv\Scripts\python.exe -m unittest tests.test_mvp_high tests.test_mvp_high_polish -v
 ```
 
-### Still open (next polish)
-- Deeper editor (split/merge cues, TM archive UI)
-- QA gold upload from disk + exportable HTML/PDF reports
-- Series character sheets beyond glossary terms
-- Batch export-all / retry-failed / persistent queue across restarts
+### Remaining optional polish (not blocking MVP High)
+- Translation-memory archive UI
+- PDF QA (HTML is the portable export; PDF optional later)
+- Character aliases in translate mask
+- Batch auto-resume worker on engine boot
 
 ---
 
