@@ -25,9 +25,10 @@ logger = logging.getLogger("subparty.pipeline")
 EventCallback = Callable[[dict[str, Any]], None]
 
 # Adaptive sampling bounds (seconds between samples)
-_MIN_INTERVAL = 0.7
-_MAX_INTERVAL = 2.5
+_MIN_INTERVAL = 0.5
+_MAX_INTERVAL = 2.8
 _DEFAULT_LOOKAHEAD = 10.0
+_SEEK_COOLDOWN_S = 2.5  # after seek: snap to playhead, denser near-now window
 
 
 @dataclass
@@ -191,6 +192,11 @@ class JobManager:
             lookahead = base_lookahead
             last_zh = ""
             blank_streak = 0
+            dialogue_streak = 0
+            lag_ema = 0.0
+            seek_until = 0.0
+            last_playhead = job.playhead
+            last_playhead_wall = time.perf_counter()
 
             with tempfile.TemporaryDirectory(prefix="subparty_") as tmp:
                 tmp_dir = Path(tmp)
@@ -199,32 +205,64 @@ class JobManager:
                     if len(done) >= n_ticks:
                         break
 
+                    seeked = job._seek_event.is_set()
                     job._seek_event.clear()
+                    if seeked:
+                        seek_until = time.perf_counter() + _SEEK_COOLDOWN_S
+                        # Drop unfinished backlog markers behind new playhead so we don't crawl
+                        with job._playhead_lock:
+                            ph_now = job.playhead
+                        ph_tick0 = max(0, int(ph_now / base_tick))
+                        # Keep done set but mark gaps behind as skippable empties when far behind
+                        for s in range(max(0, ph_tick0 - int(8.0 / base_tick)), ph_tick0):
+                            if s not in done:
+                                done.add(s)
+                                slot_text.setdefault(s, "")
+
                     with job._playhead_lock:
                         playhead = job.playhead
 
-                    # Adaptive interval from recent OCR cost + lag
+                    wall = time.perf_counter()
+                    dt_wall = max(1e-3, wall - last_playhead_wall)
+                    playhead_vel = (playhead - last_playhead) / dt_wall  # ~1.0 when watching 1×
+                    last_playhead = playhead
+                    last_playhead_wall = wall
+                    scrubbing = abs(playhead_vel) > 2.5
+
+                    # Adaptive interval from recent OCR cost + lag + dialogue density
                     avg_s = (sum(timings) / len(timings)) if timings else interval
                     lag = job.live_lag
-                    if lag > 4.0:
-                        # Falling behind: coarsen + shrink lookahead; skip backlog
-                        interval = min(_MAX_INTERVAL, max(avg_s * 1.25, 1.4))
-                        lookahead = max(4.0, base_lookahead * 0.5)
-                    elif lag > 1.5:
-                        interval = min(_MAX_INTERVAL, max(avg_s * 1.1, 1.0))
-                        lookahead = max(6.0, base_lookahead * 0.75)
-                    elif lag < -1.0:
-                        # Buffer ahead: can densify a bit
-                        interval = max(_MIN_INTERVAL, min(avg_s * 0.85, 1.0))
-                        lookahead = min(18.0, base_lookahead * 1.3)
+                    lag_ema = 0.65 * lag_ema + 0.35 * lag if timings else lag
+                    in_seek = wall < seek_until
+
+                    if in_seek or lag_ema > 3.5 or scrubbing:
+                        # Snap mode: coarse stride, tiny lookahead, chase playhead
+                        interval = min(_MAX_INTERVAL, max(avg_s * 1.15, 1.2))
+                        lookahead = 3.5 if scrubbing else 5.0
+                    elif lag_ema > 1.2:
+                        interval = min(_MAX_INTERVAL, max(avg_s * 1.05, 0.95))
+                        lookahead = max(5.0, base_lookahead * 0.7)
+                    elif lag_ema < -1.5 and dialogue_streak > 0:
+                        # Comfortable buffer during dialogue → densify for clean cuts
+                        interval = max(_MIN_INTERVAL, min(avg_s * 0.8, 0.75))
+                        lookahead = min(20.0, base_lookahead * 1.4)
+                    elif lag_ema < -1.0:
+                        interval = max(_MIN_INTERVAL, min(avg_s * 0.9, 0.95))
+                        lookahead = min(16.0, base_lookahead * 1.2)
                     else:
-                        interval = max(_MIN_INTERVAL, min(_MAX_INTERVAL, max(avg_s * 1.05, 0.85)))
+                        # Track cost; allow sub-second when OCR is fast
+                        target = max(avg_s * 1.02, 0.55 if avg_s < 0.55 else 0.75)
+                        interval = max(_MIN_INTERVAL, min(_MAX_INTERVAL, target))
                         lookahead = base_lookahead
 
-                    # Blank streak → jump farther (no dialogue to catch)
                     stride_ticks = max(1, int(round(interval / base_tick)))
-                    if blank_streak >= 3:
-                        stride_ticks = max(stride_ticks, int(round(1.6 / base_tick)))
+                    if blank_streak >= 2:
+                        stride_ticks = max(stride_ticks, int(round(1.4 / base_tick)))
+                    if blank_streak >= 5:
+                        stride_ticks = max(stride_ticks, int(round(2.2 / base_tick)))
+                    if dialogue_streak >= 2 and lag_ema < 0.8 and not in_seek:
+                        # Hold denser grid through active dialogue
+                        stride_ticks = max(1, min(stride_ticks, int(round(0.7 / base_tick))))
 
                     job.sample_interval = stride_ticks * base_tick
 
@@ -235,7 +273,8 @@ class JobManager:
                         playhead=playhead,
                         lookahead=lookahead,
                         stride_ticks=stride_ticks,
-                        lagging=lag > 1.5,
+                        lagging=lag_ema > 1.0 or in_seek or scrubbing,
+                        near_window_s=1.2 if (dialogue_streak or lag_ema < 0.5) else 0.6,
                     )
                     if tick is None:
                         break
@@ -265,24 +304,27 @@ class JobManager:
                     if len(timings) > 30:
                         timings = timings[-30:]
 
-                    # Mark this tick done; when lagging, also mark skipped ticks behind playhead
-                    # in the live window so we don't crawl through backlog later
                     done.add(tick)
                     slot_text[tick] = zh
-                    if lag > 2.0:
+                    # When lagging hard, skip unfinished ticks behind playhead
+                    if lag_ema > 1.8 or in_seek:
                         ph_tick = max(0, int(playhead / base_tick))
-                        for s in range(max(0, ph_tick - int(2.0 / base_tick)), ph_tick):
+                        skip_back = int((3.0 if in_seek else 2.0) / base_tick)
+                        for s in range(max(0, ph_tick - skip_back), ph_tick):
                             if s not in done:
                                 done.add(s)
                                 slot_text.setdefault(s, "")
 
                     if zh:
                         blank_streak = 0
+                        dialogue_streak = min(8, dialogue_streak + 1)
                     else:
                         blank_streak += 1
+                        dialogue_streak = max(0, dialogue_streak - 1)
                     if zh and zh == last_zh:
-                        # Same dialogue — treat nearby unfinished ticks as same text cheaply
-                        for s in range(tick + 1, min(n_ticks, tick + stride_ticks)):
+                        # Same dialogue — fill nearby unfinished ticks cheaply
+                        fill_to = stride_ticks + (1 if dialogue_streak >= 2 else 0)
+                        for s in range(tick + 1, min(n_ticks, tick + fill_to)):
                             if s not in done:
                                 done.add(s)
                                 slot_text[s] = zh
@@ -334,11 +376,11 @@ class JobManager:
                             "ticks_total": n_ticks,
                             "series_id": job.series_id,
                             "region": job.region,
+                            "seek_boost": in_seek,
                         },
                     )
 
                     if job._seek_event.is_set():
-                        # On seek: abandon dense catch-up; next loop retargets to new playhead
                         continue
 
             if job._cancel.is_set():
@@ -460,11 +502,12 @@ def _pick_next_tick(
     lookahead: float,
     stride_ticks: int,
     lagging: bool,
+    near_window_s: float = 0.8,
 ) -> int | None:
     """
     Playhead-first picker.
-    When lagging: jump to playhead (skip backlog). When keeping up: walk forward by stride.
-    Background fill only when live window is already covered.
+    When lagging: jump to playhead (skip backlog). When keeping up: densify near-now,
+    then walk forward by stride. Background fill only when live window is covered.
     """
     if len(done) >= n_ticks:
         return None
@@ -472,18 +515,22 @@ def _pick_next_tick(
     ph = max(0, int(playhead / base_tick))
     ahead_end = min(n_ticks - 1, int((playhead + lookahead) / base_tick))
     stride = max(1, stride_ticks)
+    near_end = min(ahead_end, ph + max(1, int(near_window_s / base_tick)))
 
     if lagging:
         # Snap to playhead — do not crawl missed ticks behind
+        if ph < n_ticks and ph not in done:
+            return ph
         for s in range(ph, min(n_ticks, ph + stride * 4), stride):
             if s not in done:
                 return s
-        if ph not in done and ph < n_ticks:
-            return ph
+
+    # Dense holes in the immediate near-now window (dialogue cuts)
+    for s in range(ph, near_end + 1):
+        if s not in done:
+            return s
 
     # Live window: forward from playhead by stride
-    s = ph
-    # Align to stride grid near playhead
     s = ph - (ph % stride) if ph % stride else ph
     if s < ph:
         s += stride
@@ -492,8 +539,8 @@ def _pick_next_tick(
             return s
         s += stride
 
-    # Any remaining hole in live window (dense fill if we have spare capacity)
-    for s in range(ph, ahead_end + 1):
+    # Any remaining hole in live window
+    for s in range(near_end + 1, ahead_end + 1):
         if s not in done:
             return s
 
@@ -504,7 +551,7 @@ def _pick_next_tick(
             return s
         s += max(stride, int(1.5 / base_tick))
 
-    # Behind playhead only when live buffer is healthy (caller sets lagging=False)
+    # Behind playhead only when live buffer is healthy
     if not lagging:
         for s in range(0, ph, max(stride, int(2.0 / base_tick))):
             if s not in done:
