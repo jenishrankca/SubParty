@@ -97,16 +97,22 @@ c:\Users\jenis\App\SubParty\scripts\run-engine-tests.cmd
 
 Covers SRT overlap replacement, adaptive tick picking, region matrix (top/mid/bottom × 480/720/1080), OCR confidence helpers, exports/engines, and a short synth hardsub e2e (plus `samples\demo_zh_hardsub.mp4` when present).
 
-## SubParty 2.0 — Accuracy Engine (on `main`)
+## SubParty 2.1 — Accuracy Validation (Phase A on `main`)
 
-- **120s** rolling dialogue buffer (configurable) + provisional → refined cues
-- Retroactive translation refinement with revision history (final SRT = latest approved)
-- Independent timing engine (high-accuracy boundaries) + separate OCR/timing confidence
-- Quality + performance schedulers (uncertain-first refine while keeping live keep-up)
-- Benchmark: `engine/tests/test_benchmark_suite.py` + `fixtures/annotated_synth.json`
+- Cue **maturity:** provisional → context-refined → context-complete → final (120s horizon / EOF)
+- High-confidence cues stay eligible when new future dialogue arrives (no permanent skip)
+- Frame-level boundary inspection (~0.1s) around transitions
+- Metrics: OCR / timing / translation / **RTF** / live latency (`engine/metrics.py`)
+- Engine compare Argos vs NLLB vs Qwen; benches in `tests/test_accuracy_21.py`
+- Spec: [docs/subparty-2.1-accuracy.md](docs/subparty-2.1-accuracy.md)
+
+### 2.0 Accuracy Engine (still included)
+
+- **120s** rolling dialogue buffer + provisional → refined cues
+- Independent timing + quality/performance schedulers
 - Local video via `subparty://` with `webSecurity: true` ([docs/PORTABLE.md](docs/PORTABLE.md))
 
-Default engine: Argos + candidate compare. NLLB/Qwen are optional local upgrades.
+Default engine: Argos + candidate compare. NLLB/Qwen are optional local upgrades. Phase B audio verify is stubbed only.
 
 ## Portable notes
 

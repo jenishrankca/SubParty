@@ -48,14 +48,28 @@ class PerformanceScheduler:
 
 
 def rank_uncertain_cues(cues: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Quality scheduler: uncertain / provisional first, then low timing confidence."""
+    """Quality scheduler: immature / uncertain first; high-confidence still eligible."""
+
+    maturity_boost = {
+        "provisional": 4.0,
+        "context-refined": 2.0,
+        "context-complete": 0.2,
+        "final": 0.0,
+    }
 
     def score(c: dict[str, Any]) -> float:
         ocr = float(c.get("ocr_confidence") or c.get("confidence") or 1.0)
         timing = float(c.get("timing_confidence") or 1.0)
         provisional = 1.0 if c.get("provisional") else 0.0
         uncertain = 1.0 if c.get("uncertain") else 0.0
-        # Higher score = refine sooner
-        return provisional * 3.0 + uncertain * 2.0 + (1.0 - ocr) + (1.0 - timing)
+        mat = str(c.get("maturity") or ("provisional" if provisional else "context-refined"))
+        # Higher score = refine sooner — do NOT zero out high OCR confidence
+        return (
+            maturity_boost.get(mat, 1.0)
+            + provisional * 2.0
+            + uncertain * 2.0
+            + (1.0 - ocr) * 0.5
+            + (1.0 - timing)
+        )
 
     return sorted(cues, key=score, reverse=True)

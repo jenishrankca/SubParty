@@ -10,6 +10,7 @@ export interface Cue {
   uncertain?: boolean;
   provisional?: boolean;
   approved?: boolean;
+  maturity?: "provisional" | "context-refined" | "context-complete" | "final";
   cue_id?: string;
   revision_count?: number;
   original_ocr?: string;

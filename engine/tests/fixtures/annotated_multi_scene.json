@@ -1,0 +1,33 @@
+{
+  "id": "multi-position-speed-duration",
+  "description": "Multiple subtitle positions, durations, and scene-like gaps",
+  "scenes": [
+    {
+      "id": "bottom-slow",
+      "width": 1280,
+      "height": 720,
+      "text_y_ratio": 0.88,
+      "seconds": 2.5,
+      "fps": 2,
+      "text_zh": "修仙不如吃饭"
+    },
+    {
+      "id": "mid-fast",
+      "width": 1280,
+      "height": 720,
+      "text_y_ratio": 0.55,
+      "seconds": 1.2,
+      "fps": 4,
+      "text_zh": "走吧"
+    },
+    {
+      "id": "top-short",
+      "width": 960,
+      "height": 540,
+      "text_y_ratio": 0.12,
+      "seconds": 1.5,
+      "fps": 2,
+      "text_zh": "小心"
+    }
+  ]
+}

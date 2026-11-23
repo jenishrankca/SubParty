@@ -33,13 +33,19 @@ class TestAccuracyCore(unittest.TestCase):
             timing_confidence=0.8,
             reason="provisional",
         )
-        rec.revise(text_en="Hello", reason="retroactive-context", provisional=False, approved=True)
+        rec.revise(
+            text_en="Hello",
+            reason="retroactive-context",
+            maturity="context-refined",
+        )
         self.assertEqual(len(rec.revisions), 2)
         self.assertEqual(rec.revisions[-1].previous_en, "Hi")
         self.assertEqual(rec.latest_approved_en(), "Hello")
+        self.assertEqual(rec.maturity, "context-refined")
         payload = rec.as_payload(1)
         self.assertIn("revisions", payload)
         self.assertEqual(payload["original_ocr"], "你好")
+        self.assertEqual(payload["maturity"], "context-refined")
 
     def test_timing_refine(self) -> None:
         slot_text = {10: "", 11: "走吧", 12: "走吧", 13: "走吧", 14: ""}

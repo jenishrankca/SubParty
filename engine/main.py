@@ -27,6 +27,7 @@ from job_store import (
     snapshot_path_for,
 )
 from models_mgr import ensure_model, list_models
+from audio_verify import audio_verify_status
 from paths import app_data_dir
 from pipeline import jobs
 from security import get_or_create_token, token_ok
@@ -188,11 +189,19 @@ def health() -> dict[str, Any]:
         "ffmpeg": ffmpeg_ok,
         "ffprobe": ffprobe_ok,
         "error": ffmpeg_err,
-        "version": "2.0.0",
-        "mode": "accuracy-engine+provisional+refine+timing",
+        "version": "2.1.0",
+        "mode": "accuracy-validation+maturity+frame-timing",
         "auth": True,
         "context_window_s_default": 120,
         "data_dir": str(app_data_dir()),
+        "cue_maturity": [
+            "provisional",
+            "context-refined",
+            "context-complete",
+            "final",
+        ],
+        "timing_fine_step_s": 0.1,
+        "audio_verify": audio_verify_status(),
     }
 
 

@@ -16,13 +16,14 @@ from dialogue_buffer import DialogueBuffer
 from ffmpeg_util import extract_region, probe_duration, probe_size
 from glossary import glossary_for_video
 from ocr import ocr_lines, warm_ocr
-from refine import refine_batch
+from metrics import realtime_factor
+from refine import finalize_cues_at_eof, refine_batch
 from region import SubtitleRegion, default_bottom_region, detect_subtitle_region
 from revision import CueRecord
 from scheduler import PerformanceScheduler
 from srt_writer import Cue, SrtWriter, merge_cue_payloads
 from text_filters import UNCERTAIN_CONFIDENCE, filter_ocr_result
-from timing_engine import refine_boundaries, transition_ticks
+from timing_engine import DEFAULT_FINE_STEP_S, refine_boundaries, transition_ticks
 from translate import warm_translate
 
 logger = logging.getLogger("subparty.pipeline")
@@ -261,6 +262,7 @@ class JobManager:
         job = self._jobs[job_id]
         job.status = "running"
         self._emit(job, {"type": "status", "status": "running", "progress": 0, "cue_count": 0})
+        wall_t0 = time.perf_counter()
 
         try:
             warm_ocr()
@@ -298,7 +300,14 @@ class JobManager:
                 region = SubtitleRegion(
                     x=0.06, y=1.0 - band_ratio, w=0.88, h=band_ratio
                 ).clamp()
-            job.region = {"x": region.x, "y": region.y, "w": region.w, "h": region.h}
+            job.region = {
+                "x": region.x,
+                "y": region.y,
+                "w": region.w,
+                "h": region.h,
+                "_fw": frame_w,
+                "_fh": frame_h,
+            }
             self._emit(
                 job,
                 {
@@ -509,17 +518,6 @@ class JobManager:
                         buffer,
                     )
 
-                    # Retroactive refine when performance scheduler allows
-                    if perf.should_run_refine() and job.cue_records:
-                        changed = refine_batch(
-                            job.cue_records,
-                            dial_ctx=dial_ctx,
-                            buffer=buffer,
-                            limit=3 if perf.mode() == "refine" else 1,
-                        )
-                        for rec in changed:
-                            self._publish_record(job, writer, rec)
-
                     # Buffer ahead / lag relative to playhead
                     ph_tick = max(0, int(playhead / base_tick))
                     frontier = ph_tick - 1
@@ -530,6 +528,19 @@ class JobManager:
                     frontier_t = frontier * base_tick if frontier >= 0 else playhead - 30
                     job.live_lag = playhead - frontier_t
                     job.buffer_ahead = max(0.0, frontier_t - playhead)
+                    observed_until = max(playhead, frontier_t, t)
+
+                    # Retroactive refine when performance scheduler allows
+                    if perf.should_run_refine() and job.cue_records:
+                        changed = refine_batch(
+                            job.cue_records,
+                            dial_ctx=dial_ctx,
+                            buffer=buffer,
+                            limit=4 if perf.mode() == "refine" else 2,
+                            observed_until=observed_until,
+                        )
+                        for rec in changed:
+                            self._publish_record(job, writer, rec)
 
                     avg_ms = (sum(timings) / len(timings)) * 1000 if timings else 0
                     self._emit(
@@ -569,17 +580,18 @@ class JobManager:
                 self._emit(job, {"type": "status", "status": "cancelled", "progress": job.progress})
                 return
 
-            # Final refine pass: promote provisional with full buffer
+            # EOF: full-buffer refine → context-complete → final
             if job.cue_records:
-                for rec in refine_batch(
-                    job.cue_records, dial_ctx=dial_ctx, buffer=buffer, limit=max(8, len(job.cue_records))
+                for rec in finalize_cues_at_eof(
+                    job.cue_records,
+                    dial_ctx=dial_ctx,
+                    buffer=buffer,
+                    observed_until=duration,
                 ):
                     self._publish_record(job, writer, rec)
-                for rec in job.cue_records:
-                    if rec.provisional:
-                        rec.revise(provisional=False, approved=True, reason="final-approve")
-                        self._publish_record(job, writer, rec)
 
+            processing_s = time.perf_counter() - wall_t0
+            rtf = realtime_factor(processing_s, duration)
             job.status = "done"
             job.progress = 1.0
             self._persist(job)
@@ -591,6 +603,10 @@ class JobManager:
                     "progress": 1.0,
                     "cue_count": job.cue_count,
                     "srt_path": job.srt_path,
+                    "processing_s": round(processing_s, 3),
+                    "rtf": round(rtf, 4) if rtf is not None else None,
+                    "live_latency_s": round(job.live_lag, 3),
+                    "context_window_s": job.context_window_s,
                 },
             )
         except Exception as exc:
@@ -638,6 +654,43 @@ class JobManager:
                 rough_end = min(duration, (s1 + 1) * interval)
                 confs = [slot_conf.get(s, 1.0) for s in range(s0, s1 + 1) if slot_text.get(s) == zh]
                 ocr_conf = min(confs) if confs else 1.0
+
+                fine_cache: dict[float, tuple[str, float]] = {}
+
+                def _probe(t: float) -> tuple[str, float]:
+                    key_t = round(t, 4)
+                    if key_t in fine_cache:
+                        return fine_cache[key_t]
+                    # Prefer already-known coarse slots
+                    s_near = int(round(t / interval))
+                    if s_near in done and abs(s_near * interval - t) < 1e-6:
+                        fine_cache[key_t] = (slot_text.get(s_near) or "", float(slot_conf.get(s_near) or 0.0))
+                        return fine_cache[key_t]
+                    try:
+                        frame_path = Path(tempfile.gettempdir()) / f"sp_fine_{job.id[:8]}_{key_t:.3f}.png"
+                        extract_region(
+                            Path(job.video_path),
+                            t,
+                            frame_path,
+                            x_ratio=float((job.region or {}).get("x", 0.05)),
+                            y_ratio=float((job.region or {}).get("y", 0.78)),
+                            w_ratio=float((job.region or {}).get("w", 0.9)),
+                            h_ratio=float((job.region or {}).get("h", 0.18)),
+                            height=int((job.region or {}).get("_fh", 720) or 720),
+                            width=int((job.region or {}).get("_fw", 1280) or 1280),
+                            scale_width=640,
+                        )
+                        filtered = filter_ocr_result(ocr_lines(str(frame_path)))
+                        fine_cache[key_t] = (filtered.text, float(filtered.confidence or 0.0))
+                        try:
+                            frame_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    except Exception as exc:
+                        logger.debug("fine probe @%.3f failed: %s", t, exc)
+                        fine_cache[key_t] = ("", 0.0)
+                    return fine_cache[key_t]
+
                 timing = refine_boundaries(
                     zh=zh,
                     rough_start=rough_start,
@@ -647,6 +700,8 @@ class JobManager:
                     base_tick=interval,
                     duration=duration,
                     high_accuracy=job.high_accuracy,
+                    fine_step_s=DEFAULT_FINE_STEP_S,
+                    probe_zh=_probe if job.high_accuracy else None,
                 )
                 # Extend existing record for same ZH near start, else provisional new
                 existing = next(
@@ -658,6 +713,7 @@ class JobManager:
                     None,
                 )
                 if existing:
+                    # Timing extend must NOT reset maturity / permanently skip refine
                     existing.revise(
                         start=timing.start,
                         end=timing.end,
@@ -665,8 +721,7 @@ class JobManager:
                         timing_confidence=timing.confidence,
                         timing_evidence=timing.evidence,
                         reason="timing-extend",
-                        provisional=True,
-                        approved=False,
+                        maturity=existing.maturity if existing.maturity != "final" else "context-refined",
                     )
                     buffer.add(
                         existing.start,
@@ -701,6 +756,7 @@ class JobManager:
                         reason="provisional",
                         timing_evidence=timing.evidence,
                         provisional=True,
+                        future_horizon_s=job.context_window_s,
                     )
                     job.cue_records.append(record)
                     buffer.add(

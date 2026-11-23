@@ -29,3 +29,4 @@ data/models/
 # Keep directory placeholders if committed
 !data/.gitkeep
 !data/models/.gitkeep
+engine/tests/fixtures/engine_compare_last.json

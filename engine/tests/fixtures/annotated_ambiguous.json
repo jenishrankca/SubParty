@@ -1,0 +1,27 @@
+{
+  "id": "ambiguous-then-clarify",
+  "description": "Early ambiguous ZH clarified by later dialogue — proves retroactive refine",
+  "context_window_s": 120,
+  "cues": [
+    {
+      "start": 1.0,
+      "end": 2.2,
+      "text_zh": "他来了",
+      "text_en_provisional": "He came",
+      "text_en_gold": "Li Xiaoyao has arrived",
+      "note": "Pronoun ambiguous until next lines name the person"
+    },
+    {
+      "start": 5.0,
+      "end": 6.5,
+      "text_zh": "李逍遥进门了",
+      "text_en_gold": "Li Xiaoyao entered"
+    },
+    {
+      "start": 8.0,
+      "end": 9.5,
+      "text_zh": "我们跟他走吧",
+      "text_en_gold": "Let's go with him"
+    }
+  ]
+}

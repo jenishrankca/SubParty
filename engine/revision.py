@@ -1,11 +1,20 @@
-"""Cue revision model — every change keeps OCR, timing evidence, prior EN, reason."""
+"""Cue revision model — maturity states + revision history for SubParty 2.1."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
 import time
 import uuid
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+Maturity = Literal["provisional", "context-refined", "context-complete", "final"]
+
+MATURITY_ORDER: dict[str, int] = {
+    "provisional": 0,
+    "context-refined": 1,
+    "context-complete": 2,
+    "final": 3,
+}
 
 
 @dataclass
@@ -14,6 +23,7 @@ class TimingEvidence:
     present_flags: list[bool] = field(default_factory=list)  # True when ZH matched at sample
     boundary_refined: bool = False
     method: str = "slot-merge"
+    fine_step_s: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -21,6 +31,7 @@ class TimingEvidence:
             "present_flags": list(self.present_flags),
             "boundary_refined": self.boundary_refined,
             "method": self.method,
+            "fine_step_s": self.fine_step_s,
         }
 
 
@@ -37,6 +48,7 @@ class CueRevision:
     timing_confidence: float = 1.0
     provisional: bool = True
     approved: bool = False
+    maturity: Maturity = "provisional"
     created_at: float = field(default_factory=time.time)
     timing_evidence: TimingEvidence | None = None
 
@@ -53,6 +65,7 @@ class CueRevision:
             "timing_confidence": self.timing_confidence,
             "provisional": self.provisional,
             "approved": self.approved,
+            "maturity": self.maturity,
             "created_at": self.created_at,
             "timing_evidence": self.timing_evidence.as_dict() if self.timing_evidence else None,
         }
@@ -60,7 +73,7 @@ class CueRevision:
 
 @dataclass
 class CueRecord:
-    """Stable cue identity across provisional → refined revisions."""
+    """Stable cue identity across provisional → refined → complete → final."""
 
     cue_id: str
     text_zh: str
@@ -71,9 +84,15 @@ class CueRecord:
     timing_confidence: float = 1.0
     provisional: bool = True
     approved: bool = False
+    maturity: Maturity = "provisional"
     revisions: list[CueRevision] = field(default_factory=list)
     original_ocr: str = ""
     timing_evidence: TimingEvidence | None = None
+    # Fingerprint of upcoming ZH used at last refine — new future dialogue reopens refine
+    context_fingerprint: str = ""
+    future_horizon_s: float = 120.0
+    # Latest media time observed by the pipeline (for maturity clock)
+    observed_until: float = 0.0
 
     @staticmethod
     def new(
@@ -87,9 +106,11 @@ class CueRecord:
         reason: str = "provisional",
         timing_evidence: TimingEvidence | None = None,
         provisional: bool = True,
+        future_horizon_s: float = 120.0,
     ) -> CueRecord:
         cue_id = str(uuid.uuid4())
         ev = timing_evidence or TimingEvidence()
+        maturity: Maturity = "provisional" if provisional else "context-refined"
         rev = CueRevision(
             revision_id=str(uuid.uuid4()),
             text_en=text_en,
@@ -102,6 +123,7 @@ class CueRecord:
             timing_confidence=timing_confidence,
             provisional=provisional,
             approved=not provisional,
+            maturity=maturity,
             timing_evidence=ev,
         )
         return CueRecord(
@@ -114,10 +136,31 @@ class CueRecord:
             timing_confidence=timing_confidence,
             provisional=provisional,
             approved=not provisional,
+            maturity=maturity,
             revisions=[rev],
             original_ocr=text_zh,
             timing_evidence=ev,
+            future_horizon_s=max(1.0, float(future_horizon_s)),
+            observed_until=end,
         )
+
+    def set_maturity(self, maturity: Maturity) -> None:
+        if MATURITY_ORDER.get(maturity, 0) < MATURITY_ORDER.get(self.maturity, 0):
+            # Allow demotion only from final→complete never; otherwise only advance
+            if self.maturity == "final":
+                return
+            if maturity == "provisional" and self.maturity != "provisional":
+                # Explicit reopen for new future context
+                pass
+            elif MATURITY_ORDER.get(maturity, 0) < MATURITY_ORDER.get(self.maturity, 0):
+                return
+        self.maturity = maturity
+        self.provisional = maturity == "provisional"
+        if maturity in {"context-refined", "context-complete", "final"}:
+            self.approved = True
+        if maturity == "final":
+            self.provisional = False
+            self.approved = True
 
     def revise(
         self,
@@ -131,7 +174,9 @@ class CueRecord:
         timing_confidence: float | None = None,
         provisional: bool | None = None,
         approved: bool | None = None,
+        maturity: Maturity | None = None,
         timing_evidence: TimingEvidence | None = None,
+        context_fingerprint: str | None = None,
     ) -> CueRevision:
         prev_en = self.text_en
         if text_en is not None:
@@ -146,12 +191,19 @@ class CueRecord:
             self.ocr_confidence = ocr_confidence
         if timing_confidence is not None:
             self.timing_confidence = timing_confidence
-        if provisional is not None:
-            self.provisional = provisional
-        if approved is not None:
-            self.approved = approved
+        if maturity is not None:
+            self.set_maturity(maturity)
+        elif provisional is not None or approved is not None:
+            if provisional is not None:
+                self.provisional = provisional
+            if approved is not None:
+                self.approved = approved
+            if provisional is False and approved is True and self.maturity == "provisional":
+                self.maturity = "context-refined"
         if timing_evidence is not None:
             self.timing_evidence = timing_evidence
+        if context_fingerprint is not None:
+            self.context_fingerprint = context_fingerprint
         rev = CueRevision(
             revision_id=str(uuid.uuid4()),
             text_en=self.text_en,
@@ -164,6 +216,7 @@ class CueRecord:
             timing_confidence=self.timing_confidence,
             provisional=self.provisional,
             approved=self.approved,
+            maturity=self.maturity,
             timing_evidence=self.timing_evidence,
         )
         self.revisions.append(rev)
@@ -182,7 +235,7 @@ class CueRecord:
             "start": self.start,
             "end": self.end,
             "text_zh": self.text_zh,
-            "text_en": self.text_en if self.approved or not self.provisional else self.text_en,
+            "text_en": self.text_en,
             "original_ocr": self.original_ocr,
             "confidence": min(self.ocr_confidence, self.timing_confidence),
             "ocr_confidence": self.ocr_confidence,
@@ -190,7 +243,10 @@ class CueRecord:
             "uncertain": self.ocr_confidence < 0.78 or self.timing_confidence < 0.7,
             "provisional": self.provisional,
             "approved": self.approved,
+            "maturity": self.maturity,
             "revision_count": len(self.revisions),
             "revisions": [r.as_dict() for r in self.revisions[-8:]],
             "timing_evidence": self.timing_evidence.as_dict() if self.timing_evidence else None,
+            "context_fingerprint": self.context_fingerprint,
+            "future_horizon_s": self.future_horizon_s,
         }
