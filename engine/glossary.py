@@ -71,6 +71,27 @@ class Glossary:
             if persist:
                 self._save()
 
+    def delete(self, zh_term: str, *, persist: bool = True) -> bool:
+        zh_term = (zh_term or "").strip()
+        with self._lock:
+            if zh_term not in self.terms:
+                return False
+            del self.terms[zh_term]
+            if persist:
+                self._save()
+            return True
+
+    def replace_all(self, terms: dict[str, str], *, persist: bool = True) -> None:
+        cleaned = {
+            str(k).strip(): str(v).strip()
+            for k, v in (terms or {}).items()
+            if str(k).strip() and str(v).strip()
+        }
+        with self._lock:
+            self.terms = cleaned
+            if persist:
+                self._save()
+
     def as_dict(self) -> dict:
         with self._lock:
             return {"series_id": self.series_id, "terms": dict(self.terms), "path": str(self.path)}
