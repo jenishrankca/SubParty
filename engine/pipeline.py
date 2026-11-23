@@ -118,7 +118,7 @@ class JobManager:
             return False
         job.paused = False
         job.status = "running"
-        job._pause.clear()
+        job._pause.set()  # wake the pause wait loop
         self._persist(job)
         self._emit(job, {"type": "status", "status": "running", "progress": job.progress})
         return True
