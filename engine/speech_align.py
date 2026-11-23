@@ -61,11 +61,23 @@ def propose_speech_bounds(
 
     new_start = float(best.start)
     new_end = float(best.end)
+    # Prefer word-level timestamps when available (finer than segment bounds)
+    words = list(getattr(best, "words", None) or [])
+    if words:
+        new_start = float(words[0].start)
+        new_end = float(words[-1].end)
     # If multiple strong hits, expand to cover all with sim >= threshold
     strong = [s for sim, s in scored if sim >= min_overlap_sim]
     if len(strong) >= 2:
         new_start = min(s.start for s in strong)
         new_end = max(s.end for s in strong)
+        # Expand with outermost words if present
+        all_words = []
+        for s in strong:
+            all_words.extend(list(getattr(s, "words", None) or []))
+        if all_words:
+            new_start = min(w.start for w in all_words)
+            new_end = max(w.end for w in all_words)
     if new_end <= new_start:
         new_end = new_start + 0.04
 
@@ -91,7 +103,8 @@ def propose_speech_bounds(
         "delta_end_ms": round(delta_end * 1000.0, 1),
         "char_similarity": round(best_sim, 4),
         "asr_confidence": round(float(best.confidence), 4),
-        "method": "speech-align",
+        "method": "speech-align-words" if words else "speech-align",
+        "word_count": len(words),
     }
 
 

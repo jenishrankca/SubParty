@@ -62,11 +62,28 @@ def whisper_weights_ready() -> bool:
 
 
 @dataclass
+class AudioWord:
+    start: float
+    end: float
+    word: str
+    probability: float = 0.0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "start": self.start,
+            "end": self.end,
+            "word": self.word,
+            "probability": self.probability,
+        }
+
+
+@dataclass
 class AudioSegment:
     start: float
     end: float
     text: str
     confidence: float = 0.0
+    words: list[AudioWord] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +91,7 @@ class AudioSegment:
             "end": self.end,
             "text": self.text,
             "confidence": self.confidence,
+            "words": [w.as_dict() for w in self.words],
         }
 
 
@@ -295,6 +313,7 @@ def transcribe_zh(
     *,
     model_size: str = WHISPER_SIZE,
     language: str = "zh",
+    word_timestamps: bool = True,
 ) -> list[AudioSegment]:
     model = _whisper_model(model_size)
     segments, _info = model.transcribe(
@@ -302,7 +321,7 @@ def transcribe_zh(
         language=language,
         beam_size=3,
         vad_filter=True,
-        word_timestamps=False,
+        word_timestamps=word_timestamps,
     )
     out: list[AudioSegment] = []
     for seg in segments:
@@ -312,12 +331,26 @@ def transcribe_zh(
         # avg_logprob ~ [-1, 0] → map to 0..1
         lp = float(getattr(seg, "avg_logprob", -1.0) or -1.0)
         conf = max(0.05, min(0.99, (lp + 1.2) / 1.2))
+        words: list[AudioWord] = []
+        for w in getattr(seg, "words", None) or []:
+            wt = (getattr(w, "word", None) or "").strip()
+            if not wt:
+                continue
+            words.append(
+                AudioWord(
+                    start=float(getattr(w, "start", 0.0) or 0.0),
+                    end=float(getattr(w, "end", 0.0) or 0.0),
+                    word=wt,
+                    probability=float(getattr(w, "probability", 0.0) or 0.0),
+                )
+            )
         out.append(
             AudioSegment(
                 start=float(seg.start or 0.0),
                 end=float(seg.end or 0.0),
                 text=text,
                 confidence=conf,
+                words=words,
             )
         )
     return out
@@ -345,6 +378,7 @@ def extract_and_transcribe(
     *,
     model_size: str = WHISPER_SIZE,
     work_dir: Path | None = None,
+    word_timestamps: bool = True,
 ) -> list[AudioSegment]:
     video = Path(video_path)
     own_tmp = work_dir is None
@@ -353,7 +387,9 @@ def extract_and_transcribe(
     wav = tmp / "audio_16k.wav"
     try:
         extract_audio_wav(video, wav)
-        return transcribe_zh(wav, model_size=model_size)
+        return transcribe_zh(
+            wav, model_size=model_size, word_timestamps=word_timestamps
+        )
     finally:
         if own_tmp:
             try:
@@ -362,6 +398,23 @@ def extract_and_transcribe(
                 tmp.rmdir()
             except Exception:
                 pass
+
+
+def asr_rtf_report(
+    *,
+    audio_duration_s: float,
+    processing_s: float,
+) -> dict[str, Any]:
+    """RTF for ASR path alone (processing / audio duration)."""
+    from metrics import realtime_factor
+
+    rtf = realtime_factor(processing_s, audio_duration_s)
+    return {
+        "audio_duration_s": audio_duration_s,
+        "processing_s": processing_s,
+        "rtf": rtf,
+        "faster_than_realtime": (rtf is not None and rtf < 1.0),
+    }
 
 
 TranslateFn = Callable[[str], str]
@@ -383,7 +436,19 @@ def verify_cue_records(
     if not records:
         return {"ok": True, "cues": 0, "disagreements": 0, "segments": 0}
 
-    segs = segments if segments is not None else extract_and_transcribe(video_path, model_size=model_size)
+    import time as _time
+
+    asr_rtf: dict[str, Any] | None = None
+    if segments is not None:
+        segs = segments
+    else:
+        t0 = _time.perf_counter()
+        segs = extract_and_transcribe(video_path, model_size=model_size)
+        processing_s = _time.perf_counter() - t0
+        audio_dur = max((float(s.end) for s in segs), default=0.0)
+        if audio_dur <= 0 and records:
+            audio_dur = max(float(r.end) for r in records)
+        asr_rtf = asr_rtf_report(audio_duration_s=max(audio_dur, 0.01), processing_s=processing_s)
     disagreements = 0
     evidence_list: list[dict[str, Any]] = []
 
@@ -464,7 +529,7 @@ def verify_cue_records(
         logger.warning("speech align skipped: %s", exc)
         speech_summary = {"ok": False, "error": str(exc), "aligned": 0}
 
-    return {
+    out: dict[str, Any] = {
         "ok": True,
         "cues": len(records),
         "disagreements": disagreements,
@@ -473,7 +538,11 @@ def verify_cue_records(
         "model_size": model_size,
         "evidence": evidence_list,
         "speech_align": speech_summary,
+        "word_timestamps": any(getattr(s, "words", None) for s in segs),
     }
+    if asr_rtf is not None:
+        out["asr_rtf"] = asr_rtf
+    return out
 
 
 def audio_verify_status() -> dict[str, Any]:

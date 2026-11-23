@@ -294,6 +294,26 @@ def realtime_factor(processing_s: float, video_duration_s: float) -> float | Non
     return processing_s / video_duration_s
 
 
+def multimodal_summary(pred_cues: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate OCR/audio disagreement + reconcile presence from cue payloads."""
+    n = len(pred_cues)
+    disag = sum(1 for c in pred_cues if c.get("audio_disagreement"))
+    with_asr = sum(1 for c in pred_cues if str(c.get("audio_transcript") or "").strip())
+    with_recon = sum(
+        1
+        for c in pred_cues
+        if str(c.get("reconciled_zh") or "").strip()
+        and str(c.get("reconciled_zh") or "") != str(c.get("original_ocr") or c.get("text_zh") or "")
+    )
+    return {
+        "cues": n,
+        "with_asr": with_asr,
+        "disagreements": disag,
+        "disagreement_rate": (disag / n) if n else None,
+        "reconcile_differs": with_recon,
+    }
+
+
 def summarize_job_metrics(
     *,
     pred_cues: list[dict[str, Any]],
@@ -305,6 +325,8 @@ def summarize_job_metrics(
     asr_hyp: list[str] | None = None,
     asr_gold: list[str] | None = None,
     revision_items: list[dict[str, str]] | None = None,
+    asr_processing_s: float | None = None,
+    asr_audio_duration_s: float | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "ocr": ocr_hit_rate(pred_cues, gold_cues),
@@ -312,6 +334,7 @@ def summarize_job_metrics(
         "timing": timing_errors(pred_cues, gold_cues, match_tol_s=max(timing_tol_s, 0.35)),
         "translation": translation_exact(pred_cues, gold_cues),
         "rtf": realtime_factor(processing_s, video_duration_s),
+        "multimodal": multimodal_summary(pred_cues),
         "live_latency_s": live_latency_s,
         "processing_s": processing_s,
         "video_duration_s": video_duration_s,
@@ -321,4 +344,6 @@ def summarize_job_metrics(
         out["asr_cer"] = asr_cer_vs_gold(asr_hyp, asr_gold)
     if revision_items is not None:
         out["revision"] = revision_batch_quality(revision_items)
+    if asr_processing_s is not None and asr_audio_duration_s is not None:
+        out["asr_rtf"] = realtime_factor(asr_processing_s, asr_audio_duration_s)
     return out

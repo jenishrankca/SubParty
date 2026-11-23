@@ -1,0 +1,56 @@
+{
+  "id": "mvp-critical-suite",
+  "description": "Broader annotated suite: positions, OCR≠speech, idioms, late-context ambiguity, timing targets",
+  "cues": [
+    {
+      "id": "bottom-idiom",
+      "start": 0.5,
+      "end": 2.0,
+      "text_zh": "修仙不如吃饭",
+      "text_en_gold": "Cultivation is worse than eating",
+      "position": "bottom",
+      "note": "idiom / bottom hardsub"
+    },
+    {
+      "id": "mid-short",
+      "start": 3.0,
+      "end": 3.8,
+      "text_zh": "走吧",
+      "text_en_gold": "Let's go",
+      "position": "mid",
+      "note": "short mid-screen"
+    },
+    {
+      "id": "ocr-ne-speech",
+      "start": 5.0,
+      "end": 6.5,
+      "text_zh": "他来了",
+      "audio_zh": "李逍遥来了",
+      "original_ocr": "他来了",
+      "text_en_provisional": "He came",
+      "text_en_gold": "Li Xiaoyao has arrived",
+      "note": "intentional OCR≠speech + late name context"
+    },
+    {
+      "id": "typo-ocr",
+      "start": 8.0,
+      "end": 9.2,
+      "text_zh": "李逍遥来啦",
+      "audio_zh": "李逍遥来了",
+      "original_ocr": "李逍遥来啦",
+      "text_en_gold": "Li Xiaoyao has arrived",
+      "note": "near-match OCR typo vs ASR"
+    },
+    {
+      "id": "top-warn",
+      "start": 11.0,
+      "end": 12.0,
+      "text_zh": "小心",
+      "text_en_gold": "Be careful",
+      "position": "top",
+      "note": "top-band short"
+    }
+  ],
+  "asr_gold": ["修仙不如吃饭", "走吧", "李逍遥来了", "李逍遥来了", "小心"],
+  "timing_tol_ms": 750
+}
