@@ -2,14 +2,13 @@
 
 Canonical: [subparty-mvp-spec.md](./subparty-mvp-spec.md) · Gap: [subparty-mvp-gap.md](./subparty-mvp-gap.md)
 
-## Current (`main` @ `86e85d5`)
+## Current (`main` @ `f57d601`)
 
-Critical 1–5 closed with measurable benches (CER/ms/revision/speech-align/word ts/ASR RTF/suite).  
-High 6–9 **first slices** landed: production editor, QA panel/API, glossary series+suggest, batch status panel.
+Critical 1–5 closed. High 6–9 closed for MVP slices: split/merge editor, QA gold+HTML export, character sheets, durable batch retry/export-all.
 
-## Next polish
+## Optional polish
 
-Deeper editor (split/merge), QA gold upload + exportable reports, character sheets, batch retry/export-all / durable queue.
+TM archive UI · PDF QA · character aliases in translate mask · batch auto-resume on boot
 
 ## Later
 
