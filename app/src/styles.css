@@ -162,6 +162,18 @@ button.secondary {
   box-shadow: 0 0 0 1px rgba(232, 168, 74, 0.25);
 }
 
+.cue-overlay.provisional {
+  outline: 1px dashed rgba(120, 180, 255, 0.9);
+}
+
+.cue-overlay .cue-flag {
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.85;
+  color: #9ec5ff;
+}
+
 .transport {
   position: absolute;
   left: 0;

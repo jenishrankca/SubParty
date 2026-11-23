@@ -12,12 +12,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from context_translate import DialogueContext
+from dialogue_buffer import DialogueBuffer
 from ffmpeg_util import extract_region, probe_duration, probe_size
 from glossary import glossary_for_video
 from ocr import ocr_lines, warm_ocr
+from refine import refine_batch
 from region import SubtitleRegion, default_bottom_region, detect_subtitle_region
+from revision import CueRecord
+from scheduler import PerformanceScheduler
 from srt_writer import Cue, SrtWriter, merge_cue_payloads
 from text_filters import UNCERTAIN_CONFIDENCE, filter_ocr_result
+from timing_engine import refine_boundaries, transition_ticks
 from translate import warm_translate
 
 logger = logging.getLogger("subparty.pipeline")
@@ -27,8 +32,10 @@ EventCallback = Callable[[dict[str, Any]], None]
 # Adaptive sampling bounds (seconds between samples)
 _MIN_INTERVAL = 0.5
 _MAX_INTERVAL = 2.8
+_MIN_INTERVAL_ACCURACY = 0.35
 _DEFAULT_LOOKAHEAD = 10.0
 _SEEK_COOLDOWN_S = 2.5  # after seek: snap to playhead, denser near-now window
+_DEFAULT_CONTEXT_WINDOW_S = 120.0
 
 
 @dataclass
@@ -52,6 +59,9 @@ class JobState:
     engine_id: str = "argos"
     paused: bool = False
     batch_id: str | None = None
+    context_window_s: float = _DEFAULT_CONTEXT_WINDOW_S
+    high_accuracy: bool = True
+    cue_records: list[CueRecord] = field(default_factory=list, repr=False)
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _pause: threading.Event = field(default_factory=threading.Event, repr=False)
     _playhead_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -74,6 +84,8 @@ class JobManager:
         engine_id: str = "argos",
         batch_id: str | None = None,
         resume_job_id: str | None = None,
+        context_window_s: float = _DEFAULT_CONTEXT_WINDOW_S,
+        high_accuracy: bool = True,
     ) -> JobState:
         path = Path(video_path)
         if not path.exists():
@@ -88,6 +100,8 @@ class JobManager:
         job.playhead = max(0.0, float(playhead))
         job.engine_id = (engine_id or "argos").strip().lower()
         job.batch_id = batch_id
+        job.context_window_s = max(15.0, float(context_window_s))
+        job.high_accuracy = bool(high_accuracy)
         with self._lock:
             self._jobs[job.id] = job
             self._listeners[job.id] = []
@@ -234,6 +248,9 @@ class JobManager:
             gloss = glossary_for_video(str(video))
             job.series_id = gloss.series_id
             dial_ctx = DialogueContext(window=6, glossary=gloss, engine_id=job.engine_id)
+            buffer = DialogueBuffer(window_s=job.context_window_s)
+            perf = PerformanceScheduler()
+            job.cue_records = []
             self._persist(job)
 
             # Auto subtitle region (anywhere); fall back to bottom band
@@ -332,25 +349,28 @@ class JobManager:
                     lag = job.live_lag
                     lag_ema = 0.65 * lag_ema + 0.35 * lag if timings else lag
                     in_seek = wall < seek_until
+                    perf.live_lag = lag_ema
+                    perf.buffer_ahead = job.buffer_ahead
+                    perf.avg_slot_s = avg_s
+                    min_iv, max_iv = perf.ocr_interval_bounds()
+                    if job.high_accuracy and perf.mode() != "catch_up":
+                        min_iv = min(min_iv, _MIN_INTERVAL_ACCURACY)
 
                     if in_seek or lag_ema > 3.5 or scrubbing:
-                        # Snap mode: coarse stride, tiny lookahead, chase playhead
-                        interval = min(_MAX_INTERVAL, max(avg_s * 1.15, 1.2))
+                        interval = min(max_iv, max(avg_s * 1.15, 1.2))
                         lookahead = 3.5 if scrubbing else 5.0
                     elif lag_ema > 1.2:
-                        interval = min(_MAX_INTERVAL, max(avg_s * 1.05, 0.95))
+                        interval = min(max_iv, max(avg_s * 1.05, 0.95))
                         lookahead = max(5.0, base_lookahead * 0.7)
                     elif lag_ema < -1.5 and dialogue_streak > 0:
-                        # Comfortable buffer during dialogue → densify for clean cuts
-                        interval = max(_MIN_INTERVAL, min(avg_s * 0.8, 0.75))
+                        interval = max(min_iv, min(avg_s * 0.8, 0.7))
                         lookahead = min(20.0, base_lookahead * 1.4)
                     elif lag_ema < -1.0:
-                        interval = max(_MIN_INTERVAL, min(avg_s * 0.9, 0.95))
+                        interval = max(min_iv, min(avg_s * 0.9, 0.9))
                         lookahead = min(16.0, base_lookahead * 1.2)
                     else:
-                        # Track cost; allow sub-second when OCR is fast
-                        target = max(avg_s * 1.02, 0.55 if avg_s < 0.55 else 0.75)
-                        interval = max(_MIN_INTERVAL, min(_MAX_INTERVAL, target))
+                        target = max(avg_s * 1.02, 0.5 if avg_s < 0.55 else 0.7)
+                        interval = max(min_iv, min(max_iv, target))
                         lookahead = base_lookahead
 
                     stride_ticks = max(1, int(round(interval / base_tick)))
@@ -359,21 +379,31 @@ class JobManager:
                     if blank_streak >= 5:
                         stride_ticks = max(stride_ticks, int(round(2.2 / base_tick)))
                     if dialogue_streak >= 2 and lag_ema < 0.8 and not in_seek:
-                        # Hold denser grid through active dialogue
-                        stride_ticks = max(1, min(stride_ticks, int(round(0.7 / base_tick))))
+                        stride_ticks = max(1, min(stride_ticks, int(round(0.55 / base_tick))))
 
                     job.sample_interval = stride_ticks * base_tick
 
-                    tick = _pick_next_tick(
-                        done=done,
-                        n_ticks=n_ticks,
-                        base_tick=base_tick,
-                        playhead=playhead,
-                        lookahead=lookahead,
-                        stride_ticks=stride_ticks,
-                        lagging=lag_ema > 1.0 or in_seek or scrubbing,
-                        near_window_s=1.2 if (dialogue_streak or lag_ema < 0.5) else 0.6,
-                    )
+                    # Transition-aware: prefer denser holes near text changes
+                    tick = None
+                    if perf.should_dense_transitions() and job.high_accuracy and done:
+                        last_done = max(done)
+                        for cand in transition_ticks(slot_text, done, around=last_done, radius=3):
+                            ph = max(0, int(playhead / base_tick))
+                            if abs(cand - ph) <= int(lookahead / base_tick) + 2:
+                                tick = cand
+                                break
+
+                    if tick is None:
+                        tick = _pick_next_tick(
+                            done=done,
+                            n_ticks=n_ticks,
+                            base_tick=base_tick,
+                            playhead=playhead,
+                            lookahead=lookahead,
+                            stride_ticks=stride_ticks,
+                            lagging=lag_ema > 1.0 or in_seek or scrubbing,
+                            near_window_s=1.4 if (dialogue_streak or lag_ema < 0.5) else 0.7,
+                        )
                     if tick is None:
                         break
 
@@ -449,7 +479,19 @@ class JobManager:
                         emitted_runs,
                         cue_serial,
                         dial_ctx,
+                        buffer,
                     )
+
+                    # Retroactive refine when performance scheduler allows
+                    if perf.should_run_refine() and job.cue_records:
+                        changed = refine_batch(
+                            job.cue_records,
+                            dial_ctx=dial_ctx,
+                            buffer=buffer,
+                            limit=3 if perf.mode() == "refine" else 1,
+                        )
+                        for rec in changed:
+                            self._publish_record(job, writer, rec)
 
                     # Buffer ahead / lag relative to playhead
                     ph_tick = max(0, int(playhead / base_tick))
@@ -482,6 +524,9 @@ class JobManager:
                             "series_id": job.series_id,
                             "region": job.region,
                             "seek_boost": in_seek,
+                            "scheduler_mode": perf.mode(),
+                            "context_window_s": job.context_window_s,
+                            "context_buffer": buffer.as_dict(),
                         },
                     )
 
@@ -493,6 +538,17 @@ class JobManager:
                 self._persist(job)
                 self._emit(job, {"type": "status", "status": "cancelled", "progress": job.progress})
                 return
+
+            # Final refine pass: promote provisional with full buffer
+            if job.cue_records:
+                for rec in refine_batch(
+                    job.cue_records, dial_ctx=dial_ctx, buffer=buffer, limit=max(8, len(job.cue_records))
+                ):
+                    self._publish_record(job, writer, rec)
+                for rec in job.cue_records:
+                    if rec.provisional:
+                        rec.revise(provisional=False, approved=True, reason="final-approve")
+                        self._publish_record(job, writer, rec)
 
             job.status = "done"
             job.progress = 1.0
@@ -526,6 +582,7 @@ class JobManager:
         emitted_runs: set[tuple[int, int, str]],
         serial: int,
         dial_ctx: DialogueContext,
+        buffer: DialogueBuffer,
     ) -> int:
         if not done:
             return serial
@@ -547,82 +604,124 @@ class JobManager:
             for k in older:
                 emitted_runs.discard(k)
             if key not in emitted_runs:
-                start = s0 * interval
-                end = min(duration, (s1 + 1) * interval)
+                rough_start = s0 * interval
+                rough_end = min(duration, (s1 + 1) * interval)
                 confs = [slot_conf.get(s, 1.0) for s in range(s0, s1 + 1) if slot_text.get(s) == zh]
-                confidence = min(confs) if confs else 1.0
-                upcoming = _upcoming_zh(slot_text, done, s1, limit=2)
-                serial = self._flush_cue(
-                    job,
-                    writer,
-                    serial,
-                    start,
-                    end,
-                    zh,
-                    dial_ctx,
-                    upcoming,
-                    confidence=confidence,
+                ocr_conf = min(confs) if confs else 1.0
+                timing = refine_boundaries(
+                    zh=zh,
+                    rough_start=rough_start,
+                    rough_end=rough_end,
+                    slot_text=slot_text,
+                    slot_conf=slot_conf,
+                    base_tick=interval,
+                    duration=duration,
+                    high_accuracy=job.high_accuracy,
                 )
+                # Extend existing record for same ZH near start, else provisional new
+                existing = next(
+                    (
+                        r
+                        for r in job.cue_records
+                        if r.text_zh == zh and abs(r.start - timing.start) < 0.6
+                    ),
+                    None,
+                )
+                if existing:
+                    existing.revise(
+                        start=timing.start,
+                        end=timing.end,
+                        ocr_confidence=ocr_conf,
+                        timing_confidence=timing.confidence,
+                        timing_evidence=timing.evidence,
+                        reason="timing-extend",
+                        provisional=True,
+                        approved=False,
+                    )
+                    buffer.add(
+                        existing.start,
+                        existing.text_zh,
+                        en=existing.text_en,
+                        cue_id=existing.cue_id,
+                        ocr_confidence=ocr_conf,
+                    )
+                    self._publish_record(job, writer, existing)
+                else:
+                    prior, upcoming = buffer.context_zh(timing.start)
+                    try:
+                        en = (
+                            dial_ctx.translate(
+                                zh,
+                                upcoming=upcoming[:12] or _upcoming_zh(slot_text, done, s1, limit=4),
+                                prior_override=prior[-24:] or None,
+                                compare_candidates=True,
+                            )
+                            or zh
+                        )
+                    except Exception as exc:
+                        logger.warning("translate failed, keeping ZH: %s", exc)
+                        en = zh
+                    record = CueRecord.new(
+                        text_zh=zh,
+                        start=timing.start,
+                        end=timing.end,
+                        text_en=en,
+                        ocr_confidence=ocr_conf,
+                        timing_confidence=timing.confidence,
+                        reason="provisional",
+                        timing_evidence=timing.evidence,
+                        provisional=True,
+                    )
+                    job.cue_records.append(record)
+                    buffer.add(
+                        record.start,
+                        record.text_zh,
+                        en=record.text_en,
+                        cue_id=record.cue_id,
+                        ocr_confidence=ocr_conf,
+                    )
+                    self._publish_record(job, writer, record)
                 emitted_runs.add(key)
+                serial += 1
             i = j
         return serial
 
-    def _flush_cue(
-        self,
-        job: JobState,
-        writer: SrtWriter,
-        serial: int,
-        start: float,
-        end: float,
-        zh: str,
-        dial_ctx: DialogueContext,
-        upcoming: list[str] | None = None,
-        confidence: float = 1.0,
-    ) -> int:
-        serial += 1
-        try:
-            en = dial_ctx.translate(zh, upcoming=upcoming) or zh
-        except Exception as exc:
-            logger.warning("translate failed, keeping ZH: %s", exc)
-            en = zh
-
-        conf = max(0.0, min(1.0, float(confidence)))
-        uncertain = conf < UNCERTAIN_CONFIDENCE
+    def _publish_record(self, job: JobState, writer: SrtWriter, record: CueRecord) -> None:
+        """Push latest cue state to SRT (approved EN preferred) + SSE."""
+        # Final SRT uses latest approved EN when available; live may still be provisional
+        en_for_srt = record.latest_approved_en() if record.approved else record.text_en
+        conf = min(record.ocr_confidence, record.timing_confidence)
         cue = Cue(
-            index=serial,
-            start=start,
-            end=end,
-            text_zh=zh,
-            text_en=en,
+            index=0,
+            start=record.start,
+            end=record.end,
+            text_zh=record.text_zh,
+            text_en=en_for_srt,
             confidence=conf,
-            uncertain=uncertain,
+            uncertain=conf < UNCERTAIN_CONFIDENCE or record.provisional,
         )
         stored = writer.upsert_and_rewrite(cue)
-        payload = {
-            "index": stored.index,
-            "start": stored.start,
-            "end": stored.end,
-            "text_zh": stored.text_zh,
-            "text_en": stored.text_en,
-            "confidence": float(stored.confidence),
-            "uncertain": bool(stored.uncertain),
-        }
+        payload = record.as_payload(index=stored.index)
+        payload["text_en"] = record.text_en  # live shows current (may be provisional)
+        payload["srt_en"] = en_for_srt
         job.cues = merge_cue_payloads(job.cues, payload)
         job.cue_count = len(job.cues)
-        # Re-sync payload index after merge renumber
         for c in job.cues:
-            if (
-                abs(float(c["start"]) - stored.start) < 1e-6
-                and c.get("text_zh") == stored.text_zh
-                and c.get("text_en") == stored.text_en
+            if c.get("cue_id") == record.cue_id or (
+                abs(float(c["start"]) - record.start) < 1e-6 and c.get("text_zh") == record.text_zh
             ):
                 payload = dict(c)
                 break
         self._emit(
             job,
-            {"type": "cue", "cue": payload, "cue_count": job.cue_count, "srt_path": job.srt_path},
+            {
+                "type": "cue",
+                "cue": payload,
+                "cue_count": job.cue_count,
+                "srt_path": job.srt_path,
+                "provisional": record.provisional,
+            },
         )
-        return serial
 
 
 def _pick_next_tick(

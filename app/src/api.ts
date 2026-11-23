@@ -5,7 +5,14 @@ export interface Cue {
   text_zh: string;
   text_en: string;
   confidence?: number;
+  ocr_confidence?: number;
+  timing_confidence?: number;
   uncertain?: boolean;
+  provisional?: boolean;
+  approved?: boolean;
+  cue_id?: string;
+  revision_count?: number;
+  original_ocr?: string;
 }
 
 export interface EngineInfo {

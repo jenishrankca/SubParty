@@ -249,6 +249,8 @@ export function App() {
         lookahead: 12,
         playhead: startAt,
         engine_id: engineId,
+        context_window_s: 120,
+        high_accuracy: true,
       });
       setJobId(job.id);
       setSrtPath(job.srt_path);
@@ -531,8 +533,9 @@ export function App() {
               <div
                 className={`cue-overlay${activeCue ? " visible" : ""}${bilingual ? " bilingual" : ""}${
                   activeCue?.uncertain ? " uncertain" : ""
-                }`}
+                }${activeCue?.provisional ? " provisional" : ""}`}
               >
+                {activeCue?.provisional ? <div className="cue-flag">provisional</div> : null}
                 {bilingual && activeCue?.text_zh ? <div className="cue-zh">{activeCue.text_zh}</div> : null}
                 <div className="cue-en">{activeCue?.text_en || ""}</div>
               </div>
@@ -801,7 +804,16 @@ export function App() {
                   <li key={`t-${c.start}-${c.index}`} className={c.uncertain ? "uncertain-item" : undefined}>
                     <div className="t">
                       #{c.index} · {formatTime(c.start)}–{formatTime(c.end)}
-                      {typeof c.confidence === "number" ? ` · ${Math.round(c.confidence * 100)}%` : ""}
+                      {typeof c.ocr_confidence === "number"
+                        ? ` · OCR ${Math.round(c.ocr_confidence * 100)}%`
+                        : typeof c.confidence === "number"
+                          ? ` · ${Math.round(c.confidence * 100)}%`
+                          : ""}
+                      {typeof c.timing_confidence === "number"
+                        ? ` · T ${Math.round(c.timing_confidence * 100)}%`
+                        : ""}
+                      {c.provisional ? " · provisional" : ""}
+                      {c.revision_count && c.revision_count > 1 ? ` · r${c.revision_count}` : ""}
                       <button type="button" className="linkish" onClick={() => setEditCue({ ...c })}>
                         Edit
                       </button>

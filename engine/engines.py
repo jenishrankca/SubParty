@@ -42,12 +42,15 @@ class TranslationEngine(ABC):
             ok = self.available()
         except Exception:
             ok = False
+        note = getattr(self, "notes", "")
+        if getattr(self, "experimental", False):
+            note = f"[experimental] {note}".strip()
         return EngineInfo(
             id=self.id,
             name=self.name,
             available=ok,
             local=True,
-            notes=getattr(self, "notes", ""),
+            notes=note,
         )
 
 
@@ -98,11 +101,15 @@ def _argos_cached(text: str, src: str, tgt: str) -> str:
 
 
 class NLLBEngine(TranslationEngine):
-    """Optional local NLLB via transformers+torch when installed; otherwise unavailable stub."""
+    """Optional local NLLB — available when deps installed; not the default (unvalidated at scale)."""
 
     id = "nllb"
-    name = "NLLB-200 (local)"
-    notes = "Optional: pip install transformers torch sentencepiece. Uses facebook/nllb-200-distilled-600M."
+    name = "NLLB-200 (optional)"
+    notes = (
+        "Optional local model (facebook/nllb-200-distilled-600M). "
+        "Not production-validated in SubParty benchmarks yet — use for experiments."
+    )
+    experimental = True
     _pipe: Callable | None = None
 
     def available(self) -> bool:
@@ -141,16 +148,21 @@ class NLLBEngine(TranslationEngine):
 
 
 class QwenEngine(TranslationEngine):
-    """Stub for local Qwen instruct models — architecture ready, not downloaded by default."""
+    """Experimental stub — NOT production-validated. Opt-in only."""
 
     id = "qwen"
-    name = "Qwen (local stub)"
-    notes = "Pluggable hook for a local Qwen GGUF/transformers backend. Falls back unavailable until configured."
+    name = "Qwen (experimental)"
+    notes = (
+        "NOT production-ready. Requires SUBPARTY_QWEN_MODEL and SUBPARTY_QWEN_ALLOW=1. "
+        "Prefer Argos (+ contextual candidate compare). Validate offline before trusting."
+    )
+    experimental = True
 
     def available(self) -> bool:
-        # Explicit opt-in via env path
         import os
 
+        if os.environ.get("SUBPARTY_QWEN_ALLOW", "").strip() != "1":
+            return False
         return bool(os.environ.get("SUBPARTY_QWEN_MODEL"))
 
     def translate(self, text: str, *, src: str = "zh", tgt: str = "en") -> str:

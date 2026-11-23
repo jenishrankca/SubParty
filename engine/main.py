@@ -27,7 +27,7 @@ from security import get_or_create_token, token_ok
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("subparty.api")
 
-app = FastAPI(title="SubParty Engine", version="0.5.0")
+app = FastAPI(title="SubParty Engine", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -64,6 +64,8 @@ class StartJobRequest(BaseModel):
     lookahead: float = Field(12.0, ge=4.0, le=60.0)
     playhead: float = Field(0.0, ge=0.0)
     engine_id: str = Field("argos", min_length=1)
+    context_window_s: float = Field(120.0, ge=15.0, le=600.0)
+    high_accuracy: bool = True
 
 
 class BatchJobRequest(BaseModel):
@@ -137,6 +139,8 @@ class JobResponse(BaseModel):
     engine_id: str = "argos"
     paused: bool = False
     batch_id: str | None = None
+    context_window_s: float = 120.0
+    high_accuracy: bool = True
     error: str | None = None
     cues: list[dict[str, Any]] = []
 
@@ -165,9 +169,10 @@ def health() -> dict[str, Any]:
         "ffmpeg": ffmpeg_ok,
         "ffprobe": ffprobe_ok,
         "error": ffmpeg_err,
-        "version": "0.5.0",
-        "mode": "studio+batch+engines+secure",
+        "version": "2.0.0",
+        "mode": "accuracy-engine+provisional+refine+timing",
         "auth": True,
+        "context_window_s_default": 120,
     }
 
 
@@ -192,6 +197,8 @@ def start_job(body: StartJobRequest) -> JobResponse:
             lookahead=body.lookahead,
             playhead=body.playhead,
             engine_id=body.engine_id,
+            context_window_s=body.context_window_s,
+            high_accuracy=body.high_accuracy,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -457,6 +464,8 @@ def _to_response(job: Any) -> JobResponse:
         engine_id=getattr(job, "engine_id", "argos"),
         paused=bool(getattr(job, "paused", False)),
         batch_id=getattr(job, "batch_id", None),
+        context_window_s=float(getattr(job, "context_window_s", 120.0)),
+        high_accuracy=bool(getattr(job, "high_accuracy", True)),
         error=job.error,
         cues=list(job.cues),
     )

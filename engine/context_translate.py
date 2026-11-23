@@ -1,4 +1,4 @@
-"""Dialogue context window + glossary-aware ZH→EN translation."""
+"""Dialogue context window + glossary-aware ZH→EN with candidate comparison."""
 
 from __future__ import annotations
 
@@ -23,11 +23,30 @@ _PRONOUN_HINTS = (
 )
 
 
+def pick_best_candidate(bare: str, contextual: str, *, zh: str) -> str:
+    """Prefer contextual when length/content looks coherent; else bare."""
+    bare = (bare or "").strip()
+    contextual = (contextual or "").strip()
+    if not contextual:
+        return bare
+    if not bare:
+        return contextual
+    if contextual == bare:
+        return bare
+    # Reject contextual if it swallowed neighboring sentences (too long)
+    if len(contextual) > 2.8 * max(len(bare), 1) + 20:
+        return bare
+    if len(contextual) < 0.35 * max(len(bare), 1):
+        return bare
+    # Prefer candidate that preserves more Latin letters when ZH has no digits-only
+    return contextual
+
+
 @dataclass
 class DialogueContext:
-    """Rolling window of prior/upcoming ZH lines for translation consistency."""
+    """Rolling memory for translation consistency (works with DialogueBuffer)."""
 
-    window: int = 6
+    window: int = 6  # line-count fallback when buffer not used
     prior_zh: deque[str] = field(default_factory=deque)
     prior_en: deque[str] = field(default_factory=deque)
     glossary: Any | None = None
@@ -36,40 +55,38 @@ class DialogueContext:
     _zh_to_en_names: dict[str, str] = field(default_factory=dict)
     _last_gender_pronoun: str | None = None
 
-    def translate(self, zh: str, upcoming: list[str] | None = None) -> str:
+    def translate(
+        self,
+        zh: str,
+        upcoming: list[str] | None = None,
+        prior_override: list[str] | None = None,
+        compare_candidates: bool = True,
+    ) -> str:
         zh = (zh or "").strip()
         if not zh:
             return ""
 
-        masked, mapping = (zh, {})
-        if self.glossary and self.glossary.terms:
-            masked, mapping = self.glossary.protected_translate_input(zh)
-
-        # Also protect session-learned character names
-        for zh_name, en_name in sorted(self._zh_to_en_names.items(), key=lambda kv: len(kv[0]), reverse=True):
-            if zh_name and zh_name in masked and zh_name not in mapping.values():
-                key = f"XNAME{len(mapping)}X"
-                masked = masked.replace(zh_name, key)
-                mapping[key] = en_name
-
+        masked, mapping = self._mask(zh)
         upcoming_clean = [u.strip() for u in (upcoming or []) if u and u.strip() and u.strip() != zh]
-        upcoming_masked: list[str] = []
-        for u in upcoming_clean[: max(1, self.window // 2)]:
-            um = u
-            if self.glossary and self.glossary.terms:
-                um, extra = self.glossary.protected_translate_input(u)
-                mapping.update(extra)
-            upcoming_masked.append(um)
+        upcoming_masked = [self._mask(u)[0] for u in upcoming_clean]
 
         def _tr(text: str) -> str:
             return _bare_translate(text, self.engine_id)
 
-        en = _tr(masked)
+        bare = _tr(masked)
 
-        prior = list(self.prior_zh)[-self.window :]
-        if prior or upcoming_masked:
+        prior = (
+            list(prior_override)
+            if prior_override is not None
+            else list(self.prior_zh)[-self.window :]
+        )
+        # Mask prior for glossary consistency
+        prior_masked = [self._mask(p)[0] for p in prior[-48:]]
+
+        contextual = bare
+        if prior_masked or upcoming_masked:
             try:
-                block_parts = prior + [masked] + upcoming_masked
+                block_parts = prior_masked + [masked] + upcoming_masked[:24]
                 compact: list[str] = []
                 for p in block_parts:
                     if not compact or compact[-1] != p:
@@ -77,24 +94,24 @@ class DialogueContext:
                 block_zh = "。".join(compact)
                 if not block_zh.endswith(("。", "！", "？", ".", "!", "?")):
                     block_zh += "。"
-                # Prefix a tiny speaker memory hint for the engine (stripped after)
-                hint_names = list(self._en_names)[-4:]
-                if hint_names:
-                    block_zh = f"（{'、'.join(hint_names)}）" + block_zh
                 block_en = _tr(block_zh)
-                # Drop leading parenthetical if model echoed it
-                block_en = re.sub(r"^\([^)]*\)\s*", "", block_en)
-                cur_idx = compact.index(masked) if masked in compact else len(prior)
-                # Adjust index if we injected a hint sentence
+                cur_idx = compact.index(masked) if masked in compact else len(prior_masked)
                 picked = _nth_sentence(block_en, cur_idx)
-                if picked and len(picked) >= 2:
-                    if 0.35 * max(len(en), 1) <= len(picked) <= 2.8 * len(en) + 16:
-                        en = picked
+                if picked:
+                    contextual = picked
             except Exception as exc:
                 logger.debug("context translate failed: %s", exc)
 
+        if compare_candidates:
+            en = pick_best_candidate(bare, contextual, zh=zh)
+        else:
+            en = contextual or bare
+
         if mapping:
-            en = self.glossary.restore_placeholders(en, mapping) if self.glossary else _restore(en, mapping)
+            if self.glossary:
+                en = self.glossary.restore_placeholders(en, mapping)
+            else:
+                en = _restore(en, mapping)
 
         preferred = dict(self.glossary.terms) if self.glossary else {}
         preferred.update(self._zh_to_en_names)
@@ -107,22 +124,39 @@ class DialogueContext:
         while len(self._en_names) > 24:
             self._en_names.popleft()
 
-        self.prior_zh.append(zh)
-        self.prior_en.append(en)
-        while len(self.prior_zh) > self.window:
-            self.prior_zh.popleft()
-            self.prior_en.popleft()
+        # Only push into line deque when not using external buffer override for priors
+        if prior_override is None:
+            self.prior_zh.append(zh)
+            self.prior_en.append(en)
+            while len(self.prior_zh) > self.window:
+                self.prior_zh.popleft()
+                self.prior_en.popleft()
         return en.strip()
 
+    def _mask(self, zh: str) -> tuple[str, dict[str, str]]:
+        mapping: dict[str, str] = {}
+        masked = zh
+        if self.glossary and self.glossary.terms:
+            masked, mapping = self.glossary.protected_translate_input(zh)
+        for zh_name, en_name in sorted(self._zh_to_en_names.items(), key=lambda kv: len(kv[0]), reverse=True):
+            if zh_name and zh_name in masked:
+                key = f"XNAME{len(mapping)}X"
+                masked = masked.replace(zh_name, key)
+                mapping[key] = en_name
+        return masked, mapping
+
     def _stabilize_pronouns(self, zh: str, en: str) -> str:
-        """Keep he/she stable across nearby lines when ZH pronoun repeats."""
         for cre, eng in _PRONOUN_HINTS:
             if cre.search(zh):
                 if self._last_gender_pronoun and eng in {"he", "she"} and self._last_gender_pronoun != eng:
-                    # Prefer the established pronoun for the scene if ZH didn't clearly switch
-                    if self._last_gender_pronoun in {"he", "she"} and eng in {"he", "she"}:
-                        # Only rewrite leading subject pronoun once
-                        en2 = re.sub(rf"\b{eng}\b", self._last_gender_pronoun, en, count=1, flags=re.IGNORECASE)
+                    if self._last_gender_pronoun in {"he", "she"}:
+                        en2 = re.sub(
+                            rf"\b{eng}\b",
+                            self._last_gender_pronoun,
+                            en,
+                            count=1,
+                            flags=re.IGNORECASE,
+                        )
                         if en2 != en:
                             en = en2
                             eng = self._last_gender_pronoun
@@ -134,7 +168,6 @@ class DialogueContext:
         candidates = extract_zh_name_candidates(zh)
         en_names = remember_en_names(en)
         if candidates and en_names:
-            # Pair shortest ZH candidate with first EN proper noun when lengths look name-like
             zh_name = candidates[0]
             en_name = en_names[0]
             if 2 <= len(zh_name) <= 3 and len(en_name.split()) <= 3:

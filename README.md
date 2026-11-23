@@ -85,11 +85,16 @@ c:\Users\jenis\App\SubParty\scripts\run-engine-tests.cmd
 
 Covers SRT overlap replacement, adaptive tick picking, region matrix (top/mid/bottom × 480/720/1080), OCR confidence helpers, exports/engines, and a short synth hardsub e2e (plus `samples\demo_zh_hardsub.mp4` when present).
 
-## Phases 2–4 (on `main`)
+## SubParty 2.0 — Accuracy Engine (on `main`)
 
-- **Translation:** engine picker (Argos / NLLB / Qwen stub), glossary tab, stronger dialogue context + name locking
-- **Studio:** timeline editor, pause/resume, Export → bilingual SRT + VTT + ASS
-- **Desktop:** batch pick, job recovery, models tab, token-secured engine IPC, [docs/PORTABLE.md](docs/PORTABLE.md)
+- **120s** rolling dialogue buffer (configurable) + provisional → refined cues
+- Retroactive translation refinement with revision history (final SRT = latest approved)
+- Independent timing engine (high-accuracy boundaries) + separate OCR/timing confidence
+- Quality + performance schedulers (uncertain-first refine while keeping live keep-up)
+- Benchmark: `engine/tests/test_benchmark_suite.py` + `fixtures/annotated_synth.json`
+- Local video via `subparty://` with `webSecurity: true` ([docs/PORTABLE.md](docs/PORTABLE.md))
+
+NLLB/Qwen remain **experimental** (not production-validated). Default engine: Argos + candidate compare.
 
 ## Portable notes
 

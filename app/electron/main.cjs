@@ -1,8 +1,9 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell, protocol, net } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 const http = require("http");
 const fs = require("fs");
+const { pathToFileURL } = require("url");
 
 const ENGINE_PORT = 18765;
 const ENGINE_URL = `http://127.0.0.1:${ENGINE_PORT}`;
@@ -11,6 +12,21 @@ const isDev = !app.isPackaged;
 let mainWindow = null;
 let engineProc = null;
 let engineToken = "";
+
+// Custom scheme so renderer can play local videos with webSecurity: true
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "subparty",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      bypassCSP: true,
+      corsEnabled: true,
+    },
+  },
+]);
 
 function projectRoot() {
   return path.resolve(__dirname, "..", "..");
@@ -44,7 +60,6 @@ function startEngine() {
   const py = resolvePython();
   const engineDir = path.join(projectRoot(), "engine");
   const mainPy = path.join(engineDir, "main.py");
-  // Ensure token exists before spawn so middleware and UI share it
   const tp = tokenPath();
   fs.mkdirSync(path.dirname(tp), { recursive: true });
   if (!fs.existsSync(tp) || !fs.readFileSync(tp, "utf8").trim()) {
@@ -107,7 +122,8 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      webSecurity: false,
+      // Local media via privileged `subparty://` protocol — keep Chromium webSecurity on.
+      webSecurity: true,
     },
   });
 
@@ -118,7 +134,30 @@ function createWindow() {
   }
 }
 
+function registerMediaProtocol() {
+  // subparty://media/<absolute-path>  → local file stream
+  protocol.handle("subparty", (request) => {
+    try {
+      const u = new URL(request.url);
+      // Expect host "media" and pathname = absolute path (/C:/... or /Users/...)
+      let filePath = decodeURIComponent(u.pathname || "");
+      if (process.platform === "win32" && filePath.startsWith("/")) {
+        filePath = filePath.slice(1);
+      }
+      filePath = path.normalize(filePath);
+      if (!fs.existsSync(filePath)) {
+        return new Response("Not found", { status: 404 });
+      }
+      return net.fetch(pathToFileURL(filePath).toString());
+    } catch (err) {
+      console.error("[subparty protocol]", err);
+      return new Response("Bad request", { status: 400 });
+    }
+  });
+}
+
 app.whenReady().then(async () => {
+  registerMediaProtocol();
   startEngine();
   try {
     await waitForEngine();
@@ -179,7 +218,8 @@ ipcMain.handle("engine-token", async () => {
 });
 
 ipcMain.handle("path-to-file-url", async (_e, filePath) => {
-  const normalized = path.resolve(filePath).replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(normalized)) return `file:///${normalized}`;
-  return `file://${normalized}`;
+  const abs = path.resolve(filePath);
+  // Prefer custom scheme for secure local playback
+  const encoded = encodeURI(abs.replace(/\\/g, "/"));
+  return `subparty://media/${encoded}`;
 });

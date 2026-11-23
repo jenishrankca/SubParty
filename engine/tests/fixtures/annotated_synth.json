@@ -1,0 +1,13 @@
+{
+  "id": "synth-bottom-720-dialogue",
+  "description": "Synthetic hardsub clip with known ZH lines and timestamps",
+  "video": "generated",
+  "width": 1280,
+  "height": 720,
+  "text_y_ratio": 0.88,
+  "cues": [
+    { "start": 0.0, "end": 1.4, "text_zh": "修仙不如吃饭" },
+    { "start": 1.5, "end": 2.9, "text_zh": "李逍遥来了" },
+    { "start": 3.0, "end": 4.5, "text_zh": "我们走吧" }
+  ]
+}
