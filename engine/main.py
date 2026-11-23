@@ -18,7 +18,15 @@ from pydantic import BaseModel, Field
 from engines import list_engines, set_active_engine
 from exports import export_job_formats
 from ffmpeg_util import ffmpeg_path, ffprobe_path
-from glossary import glossary_for_video, invalidate_glossary_cache, load_glossary, series_id_from_video
+from glossary import (
+    glossary_for_video,
+    invalidate_glossary_cache,
+    list_series_glossaries,
+    load_glossary,
+    series_id_from_video,
+    suggest_character_terms,
+)
+from qa_report import build_qa_report
 from job_store import (
     delete_snapshot,
     delete_snapshot_file,
@@ -117,6 +125,10 @@ class ExportRequest(BaseModel):
     bilingual_srt: bool = True
     vtt: bool = True
     ass: bool = True
+
+
+class QaReportRequest(BaseModel):
+    gold_cues: list[dict[str, Any]] | None = None
 
 
 class ModelEnsureRequest(BaseModel):
@@ -263,9 +275,59 @@ def start_batch(body: BatchJobRequest) -> dict[str, Any]:
     return {"batch_id": batch_id, "jobs": created}
 
 
+@app.get("/jobs/batch/{batch_id}")
+def batch_status(batch_id: str) -> dict[str, Any]:
+    """Stage 9 — aggregate production status for a batch."""
+    matched = [j for j in jobs.list_jobs() if getattr(j, "batch_id", None) == batch_id]
+    by_status: dict[str, int] = {}
+    for j in matched:
+        by_status[j.status] = by_status.get(j.status, 0) + 1
+    done = by_status.get("done", 0)
+    total = len(matched)
+    return {
+        "batch_id": batch_id,
+        "total": total,
+        "by_status": by_status,
+        "progress": (done / total) if total else 0.0,
+        "complete": total > 0 and done + by_status.get("error", 0) + by_status.get("cancelled", 0) >= total,
+        "jobs": [
+            {
+                "id": j.id,
+                "status": j.status,
+                "progress": j.progress,
+                "cue_count": j.cue_count,
+                "video_path": j.video_path,
+                "srt_path": j.srt_path,
+                "error": j.error,
+                "audio_verify": bool(getattr(j, "audio_verify", False)),
+                "audio_disagreements": (getattr(j, "audio_summary", None) or {}).get("disagreements"),
+            }
+            for j in matched
+        ],
+    }
+
+
 @app.get("/jobs")
 def list_jobs() -> dict[str, Any]:
     return {"jobs": [_to_response(j).model_dump() for j in jobs.list_jobs()]}
+
+
+@app.post("/jobs/{job_id}/qa")
+def job_qa_report(job_id: str, body: QaReportRequest | None = None) -> dict[str, Any]:
+    """Stage 7 — independent QA scores for a job (optional gold cues)."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    gold = body.gold_cues if body else None
+    return build_qa_report(job=job, gold_cues=gold)
+
+
+@app.get("/jobs/{job_id}/qa")
+def job_qa_report_get(job_id: str) -> dict[str, Any]:
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return build_qa_report(job=job)
 
 
 @app.get("/jobs/{job_id}", response_model=JobResponse)
@@ -364,6 +426,33 @@ def get_glossary(video_path: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Video not found")
     g = load_glossary(video_path)
     return g.as_dict()
+
+
+@app.get("/glossary/series")
+def glossary_series_index() -> dict[str, Any]:
+    """Stage 8 — list all series glossaries in app data."""
+    return {"series": list_series_glossaries(), "glossary_dir": str(app_data_dir() / "glossary")}
+
+
+@app.get("/glossary/suggest")
+def glossary_suggest(video_path: str | None = None, job_id: str | None = None) -> dict[str, Any]:
+    """Stage 8 — suggest character/name terms from job cues."""
+    cues: list[dict[str, Any]] = []
+    existing: dict[str, str] = {}
+    sid = ""
+    if job_id:
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        cues = list(job.cues or [])
+        sid = job.series_id or series_id_from_video(job.video_path)
+        existing = glossary_for_video(job.video_path).terms
+    elif video_path:
+        sid = series_id_from_video(video_path)
+        g = load_glossary(video_path)
+        existing = g.terms
+    suggestions = suggest_character_terms(cues, existing=existing)
+    return {"series_id": sid, "suggestions": suggestions, "existing_count": len(existing)}
 
 
 @app.post("/glossary/term")

@@ -9,6 +9,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
+from typing import Any
 
 from paths import glossary_dir, legacy_beside_video_dir
 
@@ -163,3 +164,51 @@ def invalidate_glossary_cache(series_id: str | None = None) -> None:
             _glossary_cache.clear()
         else:
             _glossary_cache.pop(series_id, None)
+
+
+def list_series_glossaries() -> list[dict[str, Any]]:
+    """List all series glossary files under app data (production memory index)."""
+    root = glossary_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    out: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            terms = data.get("terms") or {}
+            n = len(terms) if isinstance(terms, dict) else 0
+            sid = str(data.get("series_id") or path.stem)
+            out.append(
+                {
+                    "series_id": sid,
+                    "path": str(path),
+                    "term_count": n,
+                    "updated_s": path.stat().st_mtime,
+                }
+            )
+        except Exception as exc:
+            logger.warning("skip glossary %s: %s", path, exc)
+    return out
+
+
+def suggest_character_terms(
+    cues: list[dict[str, Any]],
+    *,
+    existing: dict[str, str] | None = None,
+    limit: int = 24,
+) -> list[dict[str, str]]:
+    """
+    Suggest ZH name candidates from cue ZH lines that are not yet in glossary.
+    EN left blank for human fill (or prior EN name if present in cue).
+    """
+    from names import extract_zh_name_candidates
+
+    known = existing or {}
+    counts: dict[str, int] = {}
+    for c in cues:
+        zh = str(c.get("text_zh") or c.get("original_ocr") or "")
+        for name in extract_zh_name_candidates(zh):
+            if name in known:
+                continue
+            counts[name] = counts.get(name, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], -len(kv[0]), kv[0]))
+    return [{"zh": zh, "en": "", "count": str(n)} for zh, n in ranked[:limit]]
