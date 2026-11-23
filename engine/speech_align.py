@@ -113,44 +113,70 @@ def align_cue_records_to_speech(
     segments: list[AudioSegment],
     *,
     max_shift_s: float = 0.85,
+    apply_to_display_bounds: bool = False,
 ) -> dict[str, Any]:
     """
-    Revise cue start/end toward ASR when evidence is strong.
-    Does not change text_zh / original_ocr.
+    Attach speech bounds from ASR. Visual (OCR) bounds stay on the record.
+
+    By default does **not** overwrite ``start``/``end`` (display stays visual).
+    Set ``apply_to_display_bounds=True`` only for experiments that want speech
+    as the primary timeline. Always sets ``speech_start``/``speech_end`` and
+    preserves ``visual_start``/``visual_end``.
     """
     aligned = 0
     skipped = 0
     details: list[dict[str, Any]] = []
     for rec in records:
         ocr = getattr(rec, "original_ocr", None) or getattr(rec, "text_zh", "") or ""
+        vis_s = float(getattr(rec, "visual_start", None) or rec.start)
+        vis_e = float(getattr(rec, "visual_end", None) or rec.end)
+        setattr(rec, "visual_start", vis_s)
+        setattr(rec, "visual_end", vis_e)
+
         proposal = propose_speech_bounds(
             ocr_zh=ocr,
-            cue_start=float(rec.start),
-            cue_end=float(rec.end),
+            cue_start=vis_s,
+            cue_end=vis_e,
             segments=segments,
             max_shift_s=max_shift_s,
         )
         if not proposal:
             skipped += 1
+            if getattr(rec, "timing_source", None) is None:
+                setattr(rec, "timing_source", "visual")
             continue
-        if hasattr(rec, "revise"):
+
+        speech_s = float(proposal["start"])
+        speech_e = float(proposal["end"])
+        setattr(rec, "speech_start", speech_s)
+        setattr(rec, "speech_end", speech_e)
+        setattr(rec, "timing_source", "hybrid")
+        # Inferred speech sample when OCR empty / weak and we only have ASR bounds
+        if not (ocr or "").strip():
+            setattr(rec, "inferred", True)
+
+        if apply_to_display_bounds and hasattr(rec, "revise"):
             conf = float(getattr(rec, "timing_confidence", 0.7) or 0.7)
-            # Slight boost when speech agrees
             new_tc = min(0.98, conf + 0.05 * float(proposal.get("char_similarity") or 0))
             rec.revise(
-                start=float(proposal["start"]),
-                end=float(proposal["end"]),
+                start=speech_s,
+                end=speech_e,
                 reason="speech-align",
                 timing_confidence=new_tc,
                 maturity=getattr(rec, "maturity", None),
             )
-        else:
-            rec.start = float(proposal["start"])
-            rec.end = float(proposal["end"])
+        elif apply_to_display_bounds:
+            rec.start = speech_s
+            rec.end = speech_e
+
         aligned += 1
         details.append(
             {
                 "cue_id": str(getattr(rec, "cue_id", "")),
+                "visual_start": vis_s,
+                "visual_end": vis_e,
+                "speech_start": speech_s,
+                "speech_end": speech_e,
                 **proposal,
             }
         )
@@ -160,4 +186,5 @@ def align_cue_records_to_speech(
         "skipped": skipped,
         "cues": len(records),
         "details": details,
+        "display_bounds": "speech" if apply_to_display_bounds else "visual",
     }

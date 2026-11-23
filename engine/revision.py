@@ -98,6 +98,16 @@ class CueRecord:
     reconciled_zh: str = ""
     audio_disagreement: bool = False
     audio_evidence: Any | None = None
+    # Sequence reconcile: visual (OCR) vs speech (ASR) bounds stay distinct
+    visual_start: float | None = None
+    visual_end: float | None = None
+    speech_start: float | None = None
+    speech_end: float | None = None
+    timing_source: str = "visual"  # visual | speech | hybrid
+    inferred: bool = False
+    reconcile_note: str = ""
+    asr_match_score: float = 0.0
+    asr_segment_index: int | None = None
 
     @staticmethod
     def new(
@@ -147,6 +157,9 @@ class CueRecord:
             timing_evidence=ev,
             future_horizon_s=max(1.0, float(future_horizon_s)),
             observed_until=end,
+            visual_start=start,
+            visual_end=end,
+            timing_source="visual",
         )
 
     def set_maturity(self, maturity: Maturity) -> None:
@@ -262,4 +275,13 @@ class CueRecord:
                 if self.audio_evidence is not None and hasattr(self.audio_evidence, "as_dict")
                 else self.audio_evidence
             ),
+            "visual_start": self.visual_start if self.visual_start is not None else self.start,
+            "visual_end": self.visual_end if self.visual_end is not None else self.end,
+            "speech_start": self.speech_start,
+            "speech_end": self.speech_end,
+            "timing_source": self.timing_source,
+            "inferred": self.inferred,
+            "reconcile_note": self.reconcile_note,
+            "asr_match_score": self.asr_match_score,
+            "asr_segment_index": self.asr_segment_index,
         }

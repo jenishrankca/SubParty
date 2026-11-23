@@ -473,65 +473,60 @@ def verify_cue_records(
         if audio_dur <= 0 and records:
             audio_dur = max(float(r.end) for r in records)
         asr_rtf = asr_rtf_report(audio_duration_s=max(audio_dur, 0.01), processing_s=processing_s)
-    disagreements = 0
+    # Sequence-aware OCR↔ASR match (visual vs speech bounds; mark inferred)
+    from reconcile import apply_reconcile_to_records
+
+    seq = apply_reconcile_to_records(records, segs)
+    disagreements = int(seq.get("disagreements") or 0)
     evidence_list: list[dict[str, Any]] = []
 
     for rec in records:
         ocr = getattr(rec, "original_ocr", None) or getattr(rec, "text_zh", "") or ""
-        aud, asr_conf = audio_for_window(segs, float(rec.start), float(rec.end))
-        cmp = compare_ocr_vs_speech(ocr, aud, asr_confidence=asr_conf)
-        reconciled, note = reconcile_zh(
-            original_ocr=ocr,
-            audio_zh=aud,
-            compare=cmp,
-            asr_confidence=asr_conf,
+        aud = getattr(rec, "audio_transcript", "") or ""
+        asr_conf = float(getattr(rec, "asr_match_score", 0) or 0)
+        # Prefer stored reconcile; rebuild compare for evidence payload
+        cmp = compare_ocr_vs_speech(
+            ocr,
+            aud,
+            asr_confidence=float(getattr(rec, "asr_confidence", asr_conf) or asr_conf),
         )
-        if cmp.disagreement:
-            disagreements += 1
+        note = str(getattr(rec, "reconcile_note", "") or "")
+        reconciled = str(getattr(rec, "reconciled_zh", "") or ocr)
 
         ev = AudioEvidence(
             cue_id=str(getattr(rec, "cue_id", "")),
-            start=float(rec.start),
-            end=float(rec.end),
+            start=float(getattr(rec, "visual_start", rec.start)),
+            end=float(getattr(rec, "visual_end", rec.end)),
             audio_transcript=aud,
-            asr_confidence=round(asr_conf, 4),
-            disagreement=cmp.disagreement,
+            asr_confidence=round(float(getattr(rec, "asr_confidence", cmp.confidence) or 0), 4),
+            disagreement=bool(getattr(rec, "audio_disagreement", cmp.disagreement)),
             char_similarity=cmp.char_similarity,
             reconciled_zh=reconciled,
             compare=cmp.as_dict(),
             notes=note,
         )
-        # Attach without clobbering OCR source field
-        setattr(rec, "audio_transcript", aud)
         setattr(rec, "audio_evidence", ev)
-        setattr(rec, "reconciled_zh", reconciled)
-        setattr(rec, "audio_disagreement", cmp.disagreement)
-        if not getattr(rec, "original_ocr", None):
-            setattr(rec, "original_ocr", ocr)
-
-        # Evidence-only ZH update: keep original_ocr; may revise text_zh on typo/empty adopt
-        apply_zh = bool(
-            note in {"adopt-audio-ocr-typo", "adopt-audio-ocr-empty"}
-            and reconciled
-            and reconciled != (getattr(rec, "text_zh", "") or "")
+        evidence_list.append(
+            {
+                **ev.as_dict(),
+                "visual_start": getattr(rec, "visual_start", None),
+                "visual_end": getattr(rec, "visual_end", None),
+                "speech_start": getattr(rec, "speech_start", None),
+                "speech_end": getattr(rec, "speech_end", None),
+                "timing_source": getattr(rec, "timing_source", "visual"),
+                "inferred": bool(getattr(rec, "inferred", False)),
+                "asr_segment_index": getattr(rec, "asr_segment_index", None),
+            }
         )
-        setattr(rec, "original_ocr", ocr)
-        if apply_zh:
-            if hasattr(rec, "revise"):
-                rec.revise(
-                    text_zh=reconciled,
-                    reason=f"audio-reconcile:{note}",
-                    maturity=getattr(rec, "maturity", "context-refined"),
-                )
-            else:
-                setattr(rec, "text_zh", reconciled)
 
-        # EN refresh when evidence supports adopt (ZH already updated) or confirm path
+        apply_zh = note in {"adopt-audio-ocr-typo", "adopt-audio-ocr-empty"}
         if translate_fn and reconciled and (
             apply_zh or note in {"confirm-ocr", "adopt-audio-ocr-empty", "adopt-audio-ocr-typo"}
         ):
             try:
-                new_en = translate_fn(reconciled if apply_zh else (getattr(rec, "text_zh", "") or reconciled))
+                new_en = translate_fn(
+                    reconciled if apply_zh else (getattr(rec, "text_zh", "") or reconciled)
+                )
                 if new_en and hasattr(rec, "revise"):
                     rec.revise(
                         text_en=new_en,
@@ -541,14 +536,14 @@ def verify_cue_records(
             except Exception as exc:
                 logger.warning("audio EN refresh failed: %s", exc)
 
-        evidence_list.append(ev.as_dict())
-
-    # Stage 5: speech-aligned timing (ASR bounds → cue start/end)
+    # Speech bounds on records (keep display = visual by default)
     speech_summary: dict[str, Any] = {}
     try:
         from speech_align import align_cue_records_to_speech
 
-        speech_summary = align_cue_records_to_speech(records, segs)
+        speech_summary = align_cue_records_to_speech(
+            records, segs, apply_to_display_bounds=False
+        )
     except Exception as exc:
         logger.warning("speech align skipped: %s", exc)
         speech_summary = {"ok": False, "error": str(exc), "aligned": 0}
@@ -557,10 +552,12 @@ def verify_cue_records(
         "ok": True,
         "cues": len(records),
         "disagreements": disagreements,
+        "inferred": int(seq.get("inferred") or 0),
         "segments": len(segs),
         "engine": "faster-whisper",
         "model_size": model_size,
         "evidence": evidence_list,
+        "sequence_reconcile": seq,
         "speech_align": speech_summary,
         "word_timestamps": any(getattr(s, "words", None) for s in segs),
     }

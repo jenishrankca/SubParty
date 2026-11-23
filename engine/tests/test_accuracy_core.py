@@ -84,8 +84,34 @@ class TestAccuracyCore(unittest.TestCase):
         self.assertEqual(ranked[0]["cue_id"], "b")
 
     def test_candidate_compare(self) -> None:
-        self.assertEqual(pick_best_candidate("Hello", "Hello there friend and more words" * 3, zh="你好"), "Hello")
-        self.assertEqual(pick_best_candidate("Hi", "Hello", zh="你好"), "Hello")
+        # Neighbor-swallow → bare
+        self.assertEqual(
+            pick_best_candidate("Hello", "Hello there friend and more words" * 3, zh="你好"),
+            "Hello",
+        )
+        # Cue-aware: question mark / pronoun from ZH
+        self.assertEqual(
+            pick_best_candidate("It is fine.", "Is she coming?", zh="她来了吗？"),
+            "Is she coming?",
+        )
+        # Digits preserved prefer contextual
+        self.assertEqual(
+            pick_best_candidate("Episode next", "Episode 3 begins.", zh="第3集开始"),
+            "Episode 3 begins.",
+        )
+        # Revision history still intact after pick (pick is pure)
+        rec = CueRecord.new(
+            text_zh="你好",
+            start=0.0,
+            end=1.0,
+            text_en="Hi",
+            ocr_confidence=0.9,
+            timing_confidence=0.9,
+        )
+        chosen = pick_best_candidate("Hi", "Hello", zh="你好")
+        rec.revise(text_en=chosen, reason="context-pick", maturity="context-refined")
+        self.assertEqual(len(rec.revisions), 2)
+        self.assertEqual(rec.revisions[0].text_en, "Hi")
 
 
 if __name__ == "__main__":

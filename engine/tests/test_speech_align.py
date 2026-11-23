@@ -24,7 +24,7 @@ class TestSpeechAlign(unittest.TestCase):
         self.assertAlmostEqual(prop["end"], 2.10, places=2)
         self.assertIn("delta_start_ms", prop)
 
-    def test_align_revises_records(self) -> None:
+    def test_align_attaches_speech_keeps_visual(self) -> None:
         rec = CueRecord.new(
             text_zh="他来了",
             start=0.6,
@@ -35,6 +35,29 @@ class TestSpeechAlign(unittest.TestCase):
         )
         segs = [AudioSegment(1.0, 2.0, "他来了", 0.85)]
         summary = align_cue_records_to_speech([rec], segs)
+        self.assertEqual(summary["aligned"], 1)
+        self.assertEqual(summary.get("display_bounds"), "visual")
+        # Display bounds stay visual; speech_* attached separately
+        self.assertAlmostEqual(rec.start, 0.6, places=2)
+        self.assertAlmostEqual(rec.end, 2.6, places=2)
+        self.assertAlmostEqual(float(rec.visual_start), 0.6, places=2)
+        self.assertAlmostEqual(float(rec.speech_start), 1.0, places=2)
+        self.assertAlmostEqual(float(rec.speech_end), 2.0, places=2)
+        self.assertEqual(rec.timing_source, "hybrid")
+
+    def test_align_optional_display_speech(self) -> None:
+        rec = CueRecord.new(
+            text_zh="他来了",
+            start=0.6,
+            end=2.6,
+            text_en="He came",
+            ocr_confidence=0.9,
+            timing_confidence=0.7,
+        )
+        segs = [AudioSegment(1.0, 2.0, "他来了", 0.85)]
+        summary = align_cue_records_to_speech(
+            [rec], segs, apply_to_display_bounds=True
+        )
         self.assertEqual(summary["aligned"], 1)
         self.assertAlmostEqual(rec.start, 1.0, places=2)
         self.assertAlmostEqual(rec.end, 2.0, places=2)
@@ -82,7 +105,12 @@ class TestEvidenceTypoAdopt(unittest.TestCase):
         self.assertEqual(rec.audio_transcript, "李逍遥来了")
         speech = summary.get("speech_align") or {}
         self.assertGreaterEqual(speech.get("aligned", 0), 1)
-        self.assertAlmostEqual(rec.start, 1.0, places=2)
+        # Display stays visual; speech bounds attached
+        self.assertAlmostEqual(rec.start, 0.5, places=2)
+        self.assertIsNotNone(rec.speech_start)
+        self.assertAlmostEqual(float(rec.speech_start), 1.0, places=2)
+        self.assertIn("sequence_reconcile", summary)
+        self.assertTrue(rec.inferred or rec.text_zh == "李逍遥来了")
 
 
 if __name__ == "__main__":

@@ -15,4 +15,10 @@ Outputs `baseline_<utc>.json` and `baseline_latest.json`.
 
 Per-frame FFmpeg subprocess — see `docs/engine-benchmark-brief.md` and `ffmpeg_util._run_ffmpeg_frame`.
 
-**Next PR:** PyAV persistent demux/decode adapter.
+Also on this branch: `decode_compare_*.json`, `ocr_compare_*.json`, `asr_compare_*.json`, `reconcile_pick_*.json`.
+
+```bat
+.venv\Scripts\python.exe scripts\measure_reconcile_pick.py
+```
+
+See `docs/reconcile-translate-stage.md`.

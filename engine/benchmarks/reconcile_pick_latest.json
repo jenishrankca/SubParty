@@ -1,0 +1,65 @@
+{
+  "stamp": "20261123T074209Z",
+  "branch_note": "cursor/subparty-engine-bench-7239",
+  "reconcile_fixture": {
+    "elapsed_ms": 0.095,
+    "matched": 4,
+    "inferred_count": 1,
+    "disagreements": 2,
+    "timing_sources": [
+      "hybrid",
+      "hybrid",
+      "hybrid",
+      "visual"
+    ],
+    "visual_vs_speech_delta_ms": [
+      50.0,
+      -50.0,
+      100.0,
+      0.0
+    ],
+    "sequence_aware": true
+  },
+  "pick_fixture": {
+    "elapsed_ms": 0.589,
+    "cases": 4,
+    "correct": 4,
+    "accuracy": 1.0,
+    "results": [
+      {
+        "zh": "她来了吗？",
+        "picked": "Is she coming?",
+        "expect": "Is she coming?",
+        "ok": true,
+        "bare_score": 0.95,
+        "ctx_score": 3.2
+      },
+      {
+        "zh": "第3集开始",
+        "picked": "Episode 3 begins.",
+        "expect": "Episode 3 begins.",
+        "ok": true,
+        "bare_score": 0.65,
+        "ctx_score": 2.65
+      },
+      {
+        "zh": "你好",
+        "picked": "Hello",
+        "expect": "Hello",
+        "ok": true,
+        "bare_score": 1.3,
+        "ctx_score": -5.75
+      },
+      {
+        "zh": "我们走吧",
+        "picked": "Let's go.",
+        "expect": "Let's go.",
+        "ok": true,
+        "bare_score": 1.45,
+        "ctx_score": 1.45
+      }
+    ],
+    "method": "cue-aware-semantic"
+  },
+  "video": null
+}

@@ -45,3 +45,7 @@ cd engine
 set SUBPARTY_WHISPER_DEVICE=cpu
 .venv\Scripts\python.exe scripts\compare_asr.py
 ```
+
+## Follow-on (stages 5–6 on this branch)
+
+Sequence-aware OCR↔ASR reconcile + cue-aware `pick_best_candidate`: see **`docs/reconcile-translate-stage.md`**. Display bounds stay **visual**; `speech_*` attached separately; inferred samples marked.

@@ -23,8 +23,97 @@ _PRONOUN_HINTS = (
 )
 
 
+_DIGIT_RE = re.compile(r"\d+")
+_LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _zh_cues(zh: str) -> dict[str, Any]:
+    """Extract lightweight semantic cues from the ZH source line."""
+    zh = zh or ""
+    digits = _DIGIT_RE.findall(zh)
+    cjk_n = len(_CJK_RE.findall(zh))
+    has_q = bool(re.search(r"[吗嗎呢？?]", zh))
+    has_excl = bool(re.search(r"[！!]", zh))
+    # Pronoun / person hints used downstream for EN scoring
+    pronouns = [eng for cre, eng in _PRONOUN_HINTS if cre.search(zh)]
+    return {
+        "digits": digits,
+        "cjk_n": cjk_n,
+        "has_q": has_q,
+        "has_excl": has_excl,
+        "pronouns": pronouns,
+        "compact_len": len(re.sub(r"\s+", "", zh)),
+    }
+
+
+def score_en_against_zh(en: str, *, zh: str, bare_len: int | None = None) -> float:
+    """
+    Cue-aware semantic score for an EN candidate vs ZH source.
+    Higher is better. Soft length signals only — not sole decision.
+    """
+    en = (en or "").strip()
+    if not en:
+        return -1e9
+    cues = _zh_cues(zh)
+    score = 0.0
+
+    # Digit preservation (episode numbers, counts)
+    en_digits = set(_DIGIT_RE.findall(en))
+    for d in cues["digits"]:
+        score += 1.2 if d in en_digits else -0.8
+
+    # Question / exclamation mood
+    if cues["has_q"]:
+        score += 0.9 if ("?" in en) else -0.4
+    if cues["has_excl"]:
+        score += 0.5 if ("!" in en) else 0.0
+
+    # Pronoun presence when ZH signals gender/person
+    en_l = en.lower()
+    for p in cues["pronouns"]:
+        score += 0.7 if re.search(rf"\b{re.escape(p)}\b", en_l) else -0.25
+
+    # Expected EN length vs CJK density (rough MT prior)
+    cjk_n = max(1, int(cues["cjk_n"]) or int(cues["compact_len"]) or 1)
+    ratio = len(en) / float(cjk_n)
+    if 1.2 <= ratio <= 6.5:
+        score += 0.6
+    elif ratio > 10.0:
+        score -= 1.5
+    elif ratio < 0.5:
+        score -= 1.0
+
+    # Completeness: ends with sentence punct or is short fragment
+    if re.search(r"[.!?…]$", en) or len(en.split()) <= 4:
+        score += 0.2
+
+    # Relative to bare length (neighbor-swallow / truncation)
+    if bare_len is not None and bare_len > 0:
+        rel = len(en) / float(bare_len)
+        if rel > 2.8:
+            score -= 2.5 + 0.15 * (rel - 2.8)
+        elif rel < 0.35:
+            score -= 1.8
+        elif 0.7 <= rel <= 1.6:
+            score += 0.35
+
+    # Prefer some Latin content for non-empty ZH (avoid empty-ish junk)
+    tokens = _LATIN_TOKEN_RE.findall(en)
+    if cues["cjk_n"] > 0 and tokens:
+        score += min(0.8, 0.15 * len(tokens))
+
+    return score
+
+
 def pick_best_candidate(bare: str, contextual: str, *, zh: str) -> str:
-    """Prefer contextual when length/content looks coherent; else bare."""
+    """
+    Cue-aware semantic compare of bare vs contextual EN.
+
+    Hard rejects only clear neighbor-swallow / collapse; otherwise pick the
+    higher ``score_en_against_zh``. Callers that revise cues keep full revision
+    history on ``CueRecord`` — this function only chooses the EN string.
+    """
     bare = (bare or "").strip()
     contextual = (contextual or "").strip()
     if not contextual:
@@ -33,13 +122,19 @@ def pick_best_candidate(bare: str, contextual: str, *, zh: str) -> str:
         return contextual
     if contextual == bare:
         return bare
-    # Reject contextual if it swallowed neighboring sentences (too long)
+
+    # Hard reject: contextual swallowed neighboring dialogue
     if len(contextual) > 2.8 * max(len(bare), 1) + 20:
         return bare
     if len(contextual) < 0.35 * max(len(bare), 1):
         return bare
-    # Prefer candidate that preserves more Latin letters when ZH has no digits-only
-    return contextual
+
+    bare_score = score_en_against_zh(bare, zh=zh, bare_len=len(bare))
+    ctx_score = score_en_against_zh(contextual, zh=zh, bare_len=len(bare))
+    # Slight preference for contextual when scores tie (dialogue consistency)
+    if ctx_score >= bare_score - 0.05:
+        return contextual
+    return bare
 
 
 @dataclass

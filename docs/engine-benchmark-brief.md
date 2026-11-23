@@ -81,9 +81,9 @@ Writes `engine/benchmarks/baseline_<timestamp>.json` and prints a summary table.
 1. **This stage — baseline** ← you are here  
 2. Persistent decode (PyAV)  
 3. OCR + confirmable region; DeepSeek-OCR-2 only on uncertain frames  
-4. ASR/align adapters (faster-whisper baseline vs others); visual ≠ speech timing  
-5. OCR↔ASR reconciliation  
-6. Cue-aware translation pick (replace length-based `pick_best_candidate`)  
+4. ASR/align adapters (faster-whisper baseline vs others); visual ≠ speech timing ✅  
+5. OCR↔ASR reconciliation ✅ — see `docs/reconcile-translate-stage.md`  
+6. Cue-aware translation pick (replace length-based `pick_best_candidate`) ✅  
 7. Usability (first-run models, evidence inspector, Live vs Quality clarity)
 
 ---
