@@ -240,6 +240,8 @@ export function App() {
   const [audioReady, setAudioReady] = useState<AudioVerifyStatus | null>(null);
   const [audioSummary, setAudioSummary] = useState<AudioSummary | null>(null);
   const [subtitleGate, setSubtitleGate] = useState<SubtitleGate>("idle");
+  /** Once user hits Play from Ready, never re-arm Preparing / auto-pause for buffer dips. */
+  const [watchUnlocked, setWatchUnlocked] = useState(false);
   const [bufferOrigin, setBufferOrigin] = useState(0);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
@@ -250,6 +252,8 @@ export function App() {
   const engineUrlRef = useRef(engineUrl);
   const subtitleGateRef = useRef<SubtitleGate>("idle");
   const bufferOriginRef = useRef(0);
+  const watchUnlockedRef = useRef(false);
+  const lastActiveCueRef = useRef<Cue | null>(null);
 
   useEffect(() => {
     jobIdRef.current = jobId;
@@ -263,6 +267,9 @@ export function App() {
   useEffect(() => {
     bufferOriginRef.current = bufferOrigin;
   }, [bufferOrigin]);
+  useEffect(() => {
+    watchUnlockedRef.current = watchUnlocked;
+  }, [watchUnlocked]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -419,28 +426,43 @@ export function App() {
 
   useEffect(() => {
     if (subtitleGate !== "preparing" && subtitleGate !== "ready") return;
+    // After Play: stay Ready forever until seek/reset — never thrash Preparing mid-watch
+    if (watchUnlocked) {
+      if (subtitleGate !== "ready") setSubtitleGate("ready");
+      return;
+    }
     if (bufferStatus.ready) {
       setSubtitleGate("ready");
     } else if (status === "running" || status === "paused" || status === "queued") {
       setSubtitleGate("preparing");
     }
-  }, [bufferStatus.ready, status, subtitleGate]);
+  }, [bufferStatus.ready, status, subtitleGate, watchUnlocked]);
 
-  // Hold video until buffer ready
+  // Hold video until first Ready — never pause again for buffer after unlock
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    if (subtitleGate === "preparing" && !v.paused) {
+    if (!watchUnlocked && subtitleGate === "preparing" && !v.paused) {
       v.pause();
       setPlaying(false);
     }
-  }, [subtitleGate]);
+  }, [subtitleGate, watchUnlocked]);
 
   const activeCue = useMemo(() => findActiveCue(cues, playTime), [cues, playTime]);
+  if (activeCue) lastActiveCueRef.current = activeCue;
 
-  const overlayZh = (activeCue?.text_zh || "").trim();
-  const overlayEn = (activeCue?.text_en || "").trim();
-  const showOverlay = Boolean(activeCue && (overlayEn || overlayZh));
+  const catchingUp =
+    watchUnlocked &&
+    playing &&
+    ((typeof bufferAhead === "number" && bufferAhead < 1.5) ||
+      (typeof liveLag === "number" && liveLag > 0.85) ||
+      !bufferStatus.ready);
+
+  // Keep last cue on screen while OCR catches up (no blank flash)
+  const displayCue = activeCue ?? (catchingUp ? lastActiveCueRef.current : null);
+  const overlayZh = (displayCue?.text_zh || "").trim();
+  const overlayEn = (displayCue?.text_en || "").trim();
+  const showOverlay = Boolean(displayCue && (overlayEn || overlayZh));
 
   const reviewQueue = useMemo(() => buildReviewQueue(cues), [cues]);
 
@@ -751,7 +773,9 @@ export function App() {
     setBatchNote(null);
     setError(null);
     setSubtitleGate("idle");
+    setWatchUnlocked(false);
     setBufferOrigin(0);
+    lastActiveCueRef.current = null;
   }
 
   async function refreshRecovery() {
@@ -836,7 +860,9 @@ export function App() {
     setProgress(0);
     setStatus("queued");
     setAudioSummary(null);
+    setWatchUnlocked(false);
     setSubtitleGate("preparing");
+    lastActiveCueRef.current = null;
     esRef.current?.close();
     const v = videoRef.current;
     const startAt = v?.currentTime ?? 0;
@@ -973,12 +999,18 @@ export function App() {
       setPlaying(false);
       return;
     }
-    if (subtitleGate === "preparing") {
+    if (subtitleGate === "preparing" && !watchUnlocked) {
       setError(null);
       setBatchNote("Still preparing subtitles — wait for Ready, then Play.");
       return;
     }
-    void v.play().then(() => setPlaying(true)).catch(() => undefined);
+    void v
+      .play()
+      .then(() => {
+        setPlaying(true);
+        setWatchUnlocked(true);
+      })
+      .catch(() => undefined);
   }
 
   function seekBy(delta: number) {
@@ -987,11 +1019,11 @@ export function App() {
     const next = Math.max(0, Math.min(v.duration || Number.MAX_SAFE_INTEGER, v.currentTime + delta));
     v.currentTime = next;
     setPlayTime(next);
-    if (subtitleGate === "preparing" || subtitleGate === "ready") {
-      setBufferOrigin(next);
-      // Seeking resets readiness until cues cover the new window
-      setSubtitleGate("preparing");
-    }
+    // Seek: re-arm Preparing only for the new window; unlock cleared until Ready again
+    setWatchUnlocked(false);
+    setBufferOrigin(next);
+    setSubtitleGate("preparing");
+    lastActiveCueRef.current = null;
     const jid = jobIdRef.current;
     if (jid) void apiSend(`/jobs/${jid}/playhead`, "POST", { t: next }).catch(() => undefined);
   }
@@ -1097,7 +1129,9 @@ export function App() {
       const anchor = Number(snap.playhead ?? job.playhead ?? 0) || 0;
       setBufferOrigin(anchor);
       setPlayTime(anchor);
+      setWatchUnlocked(false);
       setSubtitleGate("preparing");
+      lastActiveCueRef.current = null;
       const prior = Array.isArray(snap.cues) ? (snap.cues as Cue[]) : [];
       if (prior.length) {
         setCues(prior);
@@ -1344,12 +1378,14 @@ export function App() {
                   setMuted(e.currentTarget.muted);
                 }}
                 onPlay={(e) => {
-                  if (subtitleGateRef.current === "preparing") {
+                  // Pre-Ready only: block play. After unlock, never pause for buffer.
+                  if (!watchUnlockedRef.current && subtitleGateRef.current === "preparing") {
                     e.currentTarget.pause();
                     setPlaying(false);
                     return;
                   }
                   setPlaying(true);
+                  setWatchUnlocked(true);
                 }}
                 onPause={() => setPlaying(false)}
                 onLoadedMetadata={(e) => {
@@ -1358,7 +1394,8 @@ export function App() {
                   e.currentTarget.muted = muted;
                 }}
               />
-              {subtitleGate === "preparing" || (subtitleGate === "ready" && !playing) ? (
+              {!watchUnlocked &&
+              (subtitleGate === "preparing" || (subtitleGate === "ready" && !playing)) ? (
                 <div
                   className={`subtitle-gate ${subtitleGate === "ready" ? "ready" : "preparing"}`}
                   aria-live="polite"
@@ -1383,12 +1420,17 @@ export function App() {
                   )}
                 </div>
               ) : null}
+              {catchingUp ? (
+                <div className="catchup-badge" aria-live="polite">
+                  Catching up…
+                </div>
+              ) : null}
               <div
                 className={`cue-overlay${showOverlay ? " visible" : ""}${
-                  activeCue?.uncertain ? " uncertain" : ""
-                }${activeCue?.provisional ? " provisional" : ""}`}
+                  displayCue?.uncertain ? " uncertain" : ""
+                }${displayCue?.provisional ? " provisional" : ""}`}
               >
-                {activeCue?.provisional ? <div className="cue-flag">provisional</div> : null}
+                {displayCue?.provisional ? <div className="cue-flag">provisional</div> : null}
                 {bilingual && overlayZh ? <div className="cue-zh">{overlayZh}</div> : null}
                 {overlayEn ? (
                   <div className="cue-en">{overlayEn}</div>
@@ -1403,14 +1445,14 @@ export function App() {
                 <button
                   type="button"
                   onClick={togglePlay}
-                  disabled={subtitleGate === "preparing" && !playing}
+                  disabled={subtitleGate === "preparing" && !watchUnlocked && !playing}
                   title={
-                    subtitleGate === "preparing"
+                    subtitleGate === "preparing" && !watchUnlocked
                       ? "Wait until subtitles are buffered"
                       : undefined
                   }
                 >
-                  {playing ? "Pause" : subtitleGate === "ready" ? "Play" : "Play"}
+                  {playing ? "Pause" : "Play"}
                 </button>
                 <button type="button" className="secondary" onClick={() => seekBy(10)}>
                   +10s
@@ -1444,9 +1486,11 @@ export function App() {
                   {duration > 0 ? ` / ${formatTime(duration)}` : ""}
                 </span>
                 {audioInfo ? <span className="gate-hint" title={audioInfo}>{audioInfo}</span> : null}
-                {subtitleGate === "preparing" ? (
+                {catchingUp ? (
+                  <span className="gate-hint">Catching up…</span>
+                ) : !watchUnlocked && subtitleGate === "preparing" ? (
                   <span className="gate-hint">Preparing subtitles…</span>
-                ) : subtitleGate === "ready" && !playing ? (
+                ) : !watchUnlocked && subtitleGate === "ready" && !playing ? (
                   <span className="gate-hint">Ready — Play</span>
                 ) : null}
               </div>
@@ -1469,6 +1513,12 @@ export function App() {
               v.currentTime = t;
               setPlayTime(t);
             }
+            setWatchUnlocked(false);
+            setBufferOrigin(t);
+            setSubtitleGate("preparing");
+            lastActiveCueRef.current = null;
+            const jid = jobIdRef.current;
+            if (jid) void apiSend(`/jobs/${jid}/playhead`, "POST", { t }).catch(() => undefined);
           }}
           onSelectCue={(c) => {
             setEditCue({ ...c });
@@ -1538,21 +1588,23 @@ export function App() {
                     ? error
                     : engineOk === false
                       ? "Sidecar not reachable. Click Retry engine (or restart npm run dev)."
-                      : subtitleGate === "preparing"
-                        ? `Preparing subtitles… ${bufferStatus.cueCountInWindow} cues, ${bufferStatus.coveredAhead.toFixed(1)}s ahead of playhead.`
-                        : subtitleGate === "ready" && !playing
-                          ? "Ready — Play when you want. OCR keeps refining in the background."
-                          : status === "running"
-                            ? "Live OCR — provisional cues refine as context fills."
-                            : status === "paused"
-                              ? "Paused at playhead."
-                              : status === "done"
-                                ? "Done. Use Export for bilingual SRT / VTT / ASS — or Remove job to clear."
-                                : status === "cancelled"
-                                  ? "Job cancelled. Process again when ready."
-                                  : status === "error"
-                                    ? "Fix the issue above, then Process again — or Remove job to clear."
-                                    : "Pick a video, then Process. Playback waits until subtitles are buffered."}
+                      : catchingUp
+                        ? `Catching up… ${bufferStatus.coveredAhead.toFixed(1)}s ahead · OCR keep-up in background.`
+                        : !watchUnlocked && subtitleGate === "preparing"
+                          ? `Preparing subtitles… ${bufferStatus.cueCountInWindow} cues, ${bufferStatus.coveredAhead.toFixed(1)}s ahead of playhead.`
+                          : !watchUnlocked && subtitleGate === "ready" && !playing
+                            ? "Ready — Play when you want. OCR keeps refining in the background."
+                            : status === "running" || (watchUnlocked && playing)
+                              ? "Live OCR — provisional cues refine as context fills."
+                              : status === "paused" || (watchUnlocked && !playing)
+                                ? "Paused at playhead."
+                                : status === "done"
+                                  ? "Done. Use Export for bilingual SRT / VTT / ASS — or Remove job to clear."
+                                  : status === "cancelled"
+                                    ? "Job cancelled. Process again when ready."
+                                    : status === "error"
+                                      ? "Fix the issue above, then Process again — or Remove job to clear."
+                                      : "Pick a video, then Process. Playback waits until subtitles are buffered."}
                 </span>
               </div>
 

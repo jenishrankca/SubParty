@@ -27,9 +27,12 @@ class PerformanceScheduler:
     live_mode: bool = True
 
     def mode(self) -> str:
+        # Live: catch up when lagging OR buffer thin — prefer feeding the overlay
+        if self.live_mode and (self.live_lag > 0.6 or self.buffer_ahead < 3.0):
+            return "catch_up"
         if self.live_lag > 1.0:
             return "catch_up"
-        if self.buffer_ahead >= (3.0 if self.live_mode else 2.0) and self.live_lag < 0.4:
+        if self.buffer_ahead >= (5.0 if self.live_mode else 2.0) and self.live_lag < 0.4:
             return "refine"
         return "balanced"
 
@@ -37,11 +40,12 @@ class PerformanceScheduler:
         """min,max sample interval for current mode."""
         mode = self.mode()
         if self.live_mode:
+            # Catch-up densifies (smaller max stride) — do not jump to 3.5s holes at 1×
             if mode == "catch_up":
-                return 1.2, 3.5
+                return 0.8, 1.6
             if mode == "refine":
-                return 0.8, 1.8
-            return 1.0, 2.5
+                return 0.9, 1.8
+            return 0.9, 1.8
         if mode == "catch_up":
             return 0.9, 2.8
         if mode == "refine":
@@ -54,7 +58,7 @@ class PerformanceScheduler:
             return (
                 self.mode() == "refine"
                 and self.live_lag < 0.3
-                and self.buffer_ahead >= 4.0
+                and self.buffer_ahead >= 6.0
             )
         return self.mode() in {"refine", "balanced"} and self.live_lag < 1.2
 

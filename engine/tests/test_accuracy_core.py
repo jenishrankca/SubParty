@@ -69,8 +69,12 @@ class TestAccuracyCore(unittest.TestCase):
         perf = PerformanceScheduler(live_lag=2.0, buffer_ahead=0.0)
         self.assertEqual(perf.mode(), "catch_up")
         self.assertFalse(perf.should_run_refine())
+        # Thin buffer at 1× → stay in catch_up (feed overlay, don't refine)
         perf.live_lag = 0.1
-        perf.buffer_ahead = 3.0
+        perf.buffer_ahead = 2.0
+        self.assertEqual(perf.mode(), "catch_up")
+        # Comfortable live buffer → refine eligible
+        perf.buffer_ahead = 6.0
         self.assertEqual(perf.mode(), "refine")
         self.assertTrue(perf.should_run_refine())
 

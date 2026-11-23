@@ -41,7 +41,10 @@ _MIN_INTERVAL = 0.5
 _MAX_INTERVAL = 2.8
 _MIN_INTERVAL_ACCURACY = 0.35
 _DEFAULT_LOOKAHEAD = 10.0
-_DEFAULT_LOOKAHEAD_LIVE = 8.0
+# Live: keep a deeper playhead-ahead window so 1× watch does not drain the buffer
+_DEFAULT_LOOKAHEAD_LIVE = 12.0
+_LIVE_BUFFER_TARGET_S = 5.0  # maintain ≥ this many seconds ahead while watching
+_LIVE_BUFFER_REFILL_S = 3.0  # densify when buffer dips below this
 _SEEK_COOLDOWN_S = 2.0  # after seek: snap to playhead, drop backlog
 _DEFAULT_CONTEXT_WINDOW_S = 120.0
 _LIVE_CONTEXT_WINDOW_S = 30.0
@@ -560,18 +563,33 @@ class JobManager:
                     if job.high_accuracy and not job.live_mode and perf.mode() != "catch_up":
                         min_iv = min(min_iv, _MIN_INTERVAL_ACCURACY)
 
-                    if live_priming and job.buffer_ahead < 2.5 and not in_seek and not scrubbing:
-                        # Dense contiguous samples until Ready buffer exists
+                    # Live refill: keep sampling densely while buffer_ahead is thin at 1×
+                    live_refill = (
+                        job.live_mode
+                        and not in_seek
+                        and not scrubbing
+                        and job.buffer_ahead < _LIVE_BUFFER_REFILL_S
+                    )
+                    if (
+                        (live_priming and job.buffer_ahead < _LIVE_BUFFER_TARGET_S)
+                        or live_refill
+                    ) and not in_seek and not scrubbing:
+                        # Dense contiguous samples until Ready / refill target
                         interval = base_tick
-                        lookahead = max(base_lookahead, 6.0)
+                        lookahead = max(base_lookahead, _DEFAULT_LOOKAHEAD_LIVE)
                         stride_ticks = 1
                     elif in_seek or lag_ema > 3.5 or scrubbing:
                         interval = min(max_iv, max(avg_s * 1.15, 1.5 if job.live_mode else 1.2))
-                        lookahead = 3.0 if scrubbing else (4.0 if job.live_mode else 5.0)
+                        lookahead = 3.0 if scrubbing else (6.0 if job.live_mode else 5.0)
                         stride_ticks = max(1, int(round(interval / base_tick)))
                     elif lag_ema > 1.0:
-                        interval = min(max_iv, max(avg_s * 1.1, 1.2 if job.live_mode else 0.95))
-                        lookahead = max(4.0, base_lookahead * 0.65)
+                        interval = min(max_iv, max(avg_s * 1.05, 1.0 if job.live_mode else 0.95))
+                        # Live: still look ahead while catching up — do not shrink window
+                        lookahead = (
+                            max(_LIVE_BUFFER_TARGET_S, base_lookahead)
+                            if job.live_mode
+                            else max(4.0, base_lookahead * 0.65)
+                        )
                         stride_ticks = max(1, int(round(interval / base_tick)))
                     elif lag_ema < -1.5 and dialogue_streak > 0 and not job.live_mode:
                         interval = max(min_iv, min(avg_s * 0.8, 0.7))
@@ -583,24 +601,29 @@ class JobManager:
                         stride_ticks = max(1, int(round(interval / base_tick)))
                     else:
                         if job.live_mode:
-                            target = max(avg_s * 1.05, 1.0)
+                            # Prefer staying ahead of 1× playhead even when OCR is slower than realtime
+                            target = max(min(avg_s * 0.95, 1.0), 0.85)
+                            lookahead = max(base_lookahead, _DEFAULT_LOOKAHEAD_LIVE)
                         else:
                             target = max(avg_s * 1.02, 0.5 if avg_s < 0.55 else 0.7)
+                            lookahead = base_lookahead
                         interval = max(min_iv, min(max_iv, target))
-                        lookahead = base_lookahead
                         stride_ticks = max(1, int(round(interval / base_tick)))
 
-                    if not live_priming:
+                    if not live_priming and not live_refill:
                         if blank_streak >= 2:
                             stride_ticks = max(
                                 stride_ticks,
-                                int(round((2.0 if job.live_mode else 1.4) / base_tick)),
+                                int(round((1.5 if job.live_mode else 1.4) / base_tick)),
                             )
-                        if blank_streak >= 5:
+                        if blank_streak >= 5 and not job.live_mode:
                             stride_ticks = max(
                                 stride_ticks,
-                                int(round((3.0 if job.live_mode else 2.2) / base_tick)),
+                                int(round(2.2 / base_tick)),
                             )
+                        # Live: never stride >2s while buffer is only moderately healthy
+                        if job.live_mode and job.buffer_ahead < _LIVE_BUFFER_TARGET_S:
+                            stride_ticks = min(stride_ticks, max(1, int(round(1.2 / base_tick))))
                     if (
                         dialogue_streak >= 2
                         and lag_ema < 0.8
@@ -621,6 +644,14 @@ class JobManager:
                                 tick = cand
                                 break
 
+                    # Only "lagging" when actually behind / seeking — NOT always after priming.
+                    # Always-lagging after Ready was snapping to playhead and never building ahead.
+                    actually_lagging = (
+                        lag_ema > 0.8
+                        or in_seek
+                        or scrubbing
+                        or (job.live_mode and job.buffer_ahead <= 0.05 and lag_ema > 0.2)
+                    )
                     if tick is None:
                         tick = _pick_next_tick(
                             done=done,
@@ -629,17 +660,12 @@ class JobManager:
                             playhead=playhead,
                             lookahead=lookahead,
                             stride_ticks=stride_ticks,
-                            lagging=(
-                                lag_ema > 0.8
-                                or in_seek
-                                or scrubbing
-                                or (job.live_mode and not live_priming)
-                            ),
+                            lagging=actually_lagging,
                             near_window_s=(
-                                2.0
-                                if live_priming
+                                3.0
+                                if (live_priming or live_refill)
                                 else (
-                                    0.5
+                                    2.0
                                     if job.live_mode
                                     else (1.4 if (dialogue_streak or lag_ema < 0.5) else 0.7)
                                 )
@@ -757,7 +783,7 @@ class JobManager:
                     frontier_t = frontier * base_tick if frontier >= 0 else playhead - 30
                     job.live_lag = playhead - frontier_t
                     job.buffer_ahead = max(0.0, frontier_t - playhead)
-                    if live_priming and job.buffer_ahead >= 2.5:
+                    if live_priming and job.buffer_ahead >= _LIVE_BUFFER_TARGET_S:
                         live_priming = False
                     observed_until = max(playhead, frontier_t, t)
 
