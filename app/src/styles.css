@@ -130,41 +130,45 @@ button.danger:hover:not(:disabled) {
 .cue-overlay {
   position: absolute;
   left: 50%;
-  bottom: 8%;
+  /* Sit above the transport bar so EN/ZH stay visible */
+  bottom: 3.6rem;
   transform: translateX(-50%);
-  max-width: min(90%, 720px);
+  z-index: 5;
+  max-width: min(92%, 780px);
+  min-width: min(40%, 200px);
   padding: 0.55rem 1rem;
   border-radius: 6px;
   background: var(--cue-bg);
   color: #fff;
   text-align: center;
-  font-size: clamp(1rem, 2.2vw, 1.35rem);
+  font-size: clamp(1.05rem, 2.4vw, 1.45rem);
   line-height: 1.35;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
   pointer-events: none;
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity 100ms ease;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  align-items: center;
+  box-sizing: border-box;
 }
 
 .cue-overlay.visible {
   opacity: 1;
 }
 
-.cue-overlay.bilingual {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  align-items: center;
-}
-
 .cue-overlay .cue-zh {
-  font-size: 0.92em;
-  opacity: 0.92;
+  font-size: 0.9em;
+  opacity: 0.95;
   font-weight: 500;
+  color: #f2f5f8;
 }
 
 .cue-overlay .cue-en {
-  font-size: 1em;
+  font-size: 1.05em;
+  font-weight: 600;
+  color: #ffffff;
 }
 
 .cue-overlay.uncertain {
@@ -189,11 +193,51 @@ button.danger:hover:not(:disabled) {
   left: 0;
   right: 0;
   bottom: 0;
+  z-index: 6;
   display: flex;
   align-items: center;
   gap: 0.55rem;
   padding: 0.65rem 0.85rem;
   background: linear-gradient(transparent, rgba(0, 0, 0, 0.72));
+}
+
+.subtitle-gate {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 4;
+  padding: 0.85rem 1.25rem;
+  border-radius: 8px;
+  background: rgba(8, 12, 18, 0.88);
+  color: #e8eef5;
+  text-align: center;
+  font-size: 0.95rem;
+  line-height: 1.4;
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  max-width: min(90%, 420px);
+}
+
+.subtitle-gate strong {
+  display: block;
+  font-size: 1.05rem;
+  margin-bottom: 0.25rem;
+  color: #fff;
+}
+
+.subtitle-gate.ready strong {
+  color: #7ddea0;
+}
+
+.subtitle-gate.preparing strong {
+  color: #9ec5ff;
+}
+
+.transport .gate-hint {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: rgba(232, 238, 245, 0.85);
 }
 
 .transport .clock {

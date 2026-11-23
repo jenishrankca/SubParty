@@ -36,6 +36,97 @@ function formatTime(sec: number): string {
   return `${m}:${r.toString().padStart(2, "0")}`;
 }
 
+/** Seconds of cue coverage ahead of playhead before Play is unlocked. */
+const BUFFER_AHEAD_TARGET_S = 12;
+const BUFFER_MIN_CUES = 3;
+
+type SubtitleGate = "idle" | "preparing" | "ready";
+
+interface BufferStatus {
+  ready: boolean;
+  coveredAhead: number;
+  cueCountInWindow: number;
+  hasActiveOrNear: boolean;
+}
+
+function cueHasText(c: Cue): boolean {
+  return Boolean((c.text_en || "").trim() || (c.text_zh || "").trim());
+}
+
+function computeBufferStatus(cues: Cue[], t: number, jobDone: boolean): BufferStatus {
+  const windowEnd = t + BUFFER_AHEAD_TARGET_S;
+  const inWindow = cues.filter(
+    (c) => cueHasText(c) && c.end > t - 0.25 && c.start < windowEnd + 0.5
+  );
+  let coveredAhead = 0;
+  if (inWindow.length) {
+    const farthest = inWindow.reduce((m, c) => Math.max(m, c.end), t);
+    coveredAhead = Math.max(0, farthest - t);
+  }
+  const hasActiveOrNear = cues.some(
+    (c) => cueHasText(c) && c.start <= t + 2.5 && c.end >= t - 0.15
+  );
+  const cueCountInWindow = inWindow.length;
+  const ready =
+    jobDone && cues.some(cueHasText)
+      ? true
+      : (coveredAhead >= BUFFER_AHEAD_TARGET_S * 0.7 && cueCountInWindow >= 2) ||
+        (cueCountInWindow >= BUFFER_MIN_CUES && coveredAhead >= 6) ||
+        (hasActiveOrNear && cueCountInWindow >= BUFFER_MIN_CUES && coveredAhead >= 4);
+  return { ready, coveredAhead, cueCountInWindow, hasActiveOrNear };
+}
+
+function mergeIncomingCue(prev: Cue[], cue: Cue): Cue[] {
+  const next = [...prev];
+  let idx = -1;
+  if (cue.cue_id) {
+    idx = next.findIndex((c) => c.cue_id && c.cue_id === cue.cue_id);
+  }
+  if (idx < 0) {
+    idx = next.findIndex(
+      (c) =>
+        Math.abs(c.start - cue.start) < 0.2 &&
+        (c.text_zh || "") === (cue.text_zh || "")
+    );
+  }
+  if (idx < 0) {
+    idx = next.findIndex((c) => Math.abs(c.start - cue.start) < 0.08);
+  }
+  if (idx >= 0) {
+    next[idx] = { ...next[idx], ...cue };
+  } else {
+    next.push(cue);
+  }
+  next.sort((a, b) => a.start - b.start);
+  return next;
+}
+
+function findActiveCue(cues: Cue[], t: number): Cue | null {
+  // Prefer an in-range cue that has English (or any text)
+  let best: Cue | null = null;
+  let bestScore = -1;
+  for (const c of cues) {
+    const inRange = t >= c.start - 0.05 && t <= c.end + 0.12;
+    const near = c.start <= t + 0.35 && c.end >= t - 0.35;
+    if (!inRange && !near) continue;
+    const en = (c.text_en || "").trim();
+    const zh = (c.text_zh || "").trim();
+    if (!en && !zh) continue;
+    let score = inRange ? 10 : 3;
+    if (en) score += 5;
+    if (c.approved) score += 1;
+    if (!c.provisional) score += 1;
+    // Prefer the cue whose midpoint is closest to t
+    const mid = (c.start + c.end) / 2;
+    score -= Math.min(2, Math.abs(mid - t) * 0.15);
+    if (score > bestScore) {
+      bestScore = score;
+      best = c;
+    }
+  }
+  return best;
+}
+
 export function App() {
   const [engineUrl, setEngineUrl] = useState("http://127.0.0.1:18765");
   const [videoPath, setVideoPath] = useState<string | null>(null);
@@ -72,10 +163,14 @@ export function App() {
   const [panel, setPanel] = useState<"job" | "glossary" | "timeline" | "models">("job");
   const [batchNote, setBatchNote] = useState<string | null>(null);
   const [recovery, setRecovery] = useState<Array<Record<string, unknown>>>([]);
+  const [subtitleGate, setSubtitleGate] = useState<SubtitleGate>("idle");
+  const [bufferOrigin, setBufferOrigin] = useState(0);
   const videoRef = useRef<HTMLVideoElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const jobIdRef = useRef<string | null>(null);
   const engineUrlRef = useRef(engineUrl);
+  const subtitleGateRef = useRef<SubtitleGate>("idle");
+  const bufferOriginRef = useRef(0);
 
   useEffect(() => {
     jobIdRef.current = jobId;
@@ -83,6 +178,12 @@ export function App() {
   useEffect(() => {
     engineUrlRef.current = engineUrl;
   }, [engineUrl]);
+  useEffect(() => {
+    subtitleGateRef.current = subtitleGate;
+  }, [subtitleGate]);
+  useEffect(() => {
+    bufferOriginRef.current = bufferOrigin;
+  }, [bufferOrigin]);
 
   useEffect(() => {
     void (async () => {
@@ -166,20 +267,56 @@ export function App() {
       const jid = jobIdRef.current;
       const v = videoRef.current;
       if (!jid || !v || status === "paused") return;
-      void apiSend(`/jobs/${jid}/playhead`, "POST", { t: v.currentTime }).catch(() => undefined);
+      // While preparing, keep engine playhead at the user anchor (not advancing video)
+      const t =
+        subtitleGateRef.current === "preparing" ? bufferOriginRef.current : v.currentTime;
+      void apiSend(`/jobs/${jid}/playhead`, "POST", { t }).catch(() => undefined);
     }, 500);
     return () => window.clearInterval(id);
   }, [jobId, status]);
 
-  const activeCue = useMemo(() => {
-    const hit = cues.find((c) => playTime >= c.start && playTime <= c.end);
-    if (hit) return hit;
-    let best: Cue | null = null;
-    for (const c of cues) {
-      if (c.start <= playTime + 0.15 && c.end >= playTime - 0.4) best = c;
+  // Smooth playhead → overlay sync (timeupdate alone is too coarse / skips when paused)
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      const v = videoRef.current;
+      if (v) setPlayTime(v.currentTime);
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [videoUrl]);
+
+  const bufferClock = subtitleGate === "preparing" ? bufferOrigin : playTime;
+  const bufferStatus = useMemo(
+    () => computeBufferStatus(cues, bufferClock, status === "done"),
+    [cues, bufferClock, status]
+  );
+
+  useEffect(() => {
+    if (subtitleGate !== "preparing" && subtitleGate !== "ready") return;
+    if (bufferStatus.ready) {
+      setSubtitleGate("ready");
+    } else if (status === "running" || status === "paused" || status === "queued") {
+      setSubtitleGate("preparing");
     }
-    return best;
-  }, [cues, playTime]);
+  }, [bufferStatus.ready, status, subtitleGate]);
+
+  // Hold video until buffer ready
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (subtitleGate === "preparing" && !v.paused) {
+      v.pause();
+      setPlaying(false);
+    }
+  }, [subtitleGate]);
+
+  const activeCue = useMemo(() => findActiveCue(cues, playTime), [cues, playTime]);
+
+  const overlayZh = (activeCue?.text_zh || "").trim();
+  const overlayEn = (activeCue?.text_en || "").trim();
+  const showOverlay = Boolean(activeCue && (overlayEn || overlayZh));
 
   const uncertainCues = useMemo(
     () => cues.filter((c) => c.uncertain || (typeof c.confidence === "number" && c.confidence < 0.78)),
@@ -271,6 +408,8 @@ export function App() {
     setEditCue(null);
     setBatchNote(null);
     setError(null);
+    setSubtitleGate("idle");
+    setBufferOrigin(0);
   }
 
   async function refreshRecovery() {
@@ -354,8 +493,17 @@ export function App() {
     setCueCount(0);
     setProgress(0);
     setStatus("queued");
+    setSubtitleGate("preparing");
     esRef.current?.close();
-    const startAt = videoRef.current?.currentTime ?? 0;
+    const v = videoRef.current;
+    const startAt = v?.currentTime ?? 0;
+    setBufferOrigin(startAt);
+    setPlayTime(startAt);
+    // Never auto-start — hold until subtitle buffer is ready
+    if (v && !v.paused) {
+      v.pause();
+      setPlaying(false);
+    }
     try {
       // Optional on older sidecars — never block Process on /engines/select 404
       await apiSendOptional("/engines/select", "POST", { engine_id: engineId });
@@ -379,17 +527,9 @@ export function App() {
       setStatus(job.status);
       setDuration(job.duration || 0);
       subscribe(job.id);
-      const v = videoRef.current;
-      if (v) {
-        try {
-          await v.play();
-          setPlaying(true);
-        } catch {
-          /* gesture */
-        }
-      }
     } catch (err) {
       setStatus("error");
+      setSubtitleGate("idle");
       setError(formatApiError(err));
     } finally {
       setBusy(false);
@@ -405,17 +545,7 @@ export function App() {
         const type = String(data.type || "");
         if (type === "cue" && data.cue) {
           const cue = data.cue as Cue;
-          setCues((prev) => {
-            const next = prev.filter((c) => {
-              const sameStart = Math.abs(c.start - cue.start) < 0.12;
-              const overlaps = Math.min(c.end, cue.end) - Math.max(c.start, cue.start) > 0.05;
-              const sameZhNear = c.text_zh === cue.text_zh && Math.abs(c.start - cue.start) < 0.6;
-              return !(sameStart || overlaps || sameZhNear);
-            });
-            next.push(cue);
-            next.sort((a, b) => a.start - b.start);
-            return next;
-          });
+          setCues((prev) => mergeIncomingCue(prev, cue));
           setCueCount(Number(data.cue_count ?? 0));
           if (typeof data.srt_path === "string") setSrtPath(data.srt_path);
         } else if (type === "region") {
@@ -459,11 +589,17 @@ export function App() {
   function togglePlay() {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) void v.play().then(() => setPlaying(true)).catch(() => undefined);
-    else {
+    if (!v.paused) {
       v.pause();
       setPlaying(false);
+      return;
     }
+    if (subtitleGate === "preparing") {
+      setError(null);
+      setBatchNote("Still preparing subtitles — wait for Ready, then Play.");
+      return;
+    }
+    void v.play().then(() => setPlaying(true)).catch(() => undefined);
   }
 
   function seekBy(delta: number) {
@@ -472,6 +608,11 @@ export function App() {
     const next = Math.max(0, Math.min(v.duration || Number.MAX_SAFE_INTEGER, v.currentTime + delta));
     v.currentTime = next;
     setPlayTime(next);
+    if (subtitleGate === "preparing" || subtitleGate === "ready") {
+      setBufferOrigin(next);
+      // Seeking resets readiness until cues cover the new window
+      setSubtitleGate("preparing");
+    }
     const jid = jobIdRef.current;
     if (jid) void apiSend(`/jobs/${jid}/playhead`, "POST", { t: next }).catch(() => undefined);
   }
@@ -563,6 +704,7 @@ export function App() {
         srt_path: string;
         status: JobStatus;
         duration: number;
+        playhead?: number;
       }>("/recovery/resume", "POST", {
         snapshot_path: snap._snapshot_path,
         engine_id: engineId,
@@ -574,6 +716,21 @@ export function App() {
       setSrtPath(job.srt_path);
       setStatus(job.status);
       setDuration(job.duration || 0);
+      const anchor = Number(snap.playhead ?? job.playhead ?? 0) || 0;
+      setBufferOrigin(anchor);
+      setPlayTime(anchor);
+      setSubtitleGate("preparing");
+      const prior = Array.isArray(snap.cues) ? (snap.cues as Cue[]) : [];
+      if (prior.length) {
+        setCues(prior);
+        setCueCount(prior.length);
+      }
+      const v = videoRef.current;
+      if (v) {
+        v.pause();
+        v.currentTime = anchor;
+        setPlaying(false);
+      }
       subscribe(job.id);
       await loadGlossary(job.video_path);
     } catch (err) {
@@ -670,25 +827,66 @@ export function App() {
                 ref={videoRef}
                 src={videoUrl}
                 onTimeUpdate={(e) => setPlayTime(e.currentTarget.currentTime)}
-                onPlay={() => setPlaying(true)}
+                onPlay={(e) => {
+                  if (subtitleGateRef.current === "preparing") {
+                    e.currentTarget.pause();
+                    setPlaying(false);
+                    return;
+                  }
+                  setPlaying(true);
+                }}
                 onPause={() => setPlaying(false)}
                 onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
               />
+              {subtitleGate === "preparing" || (subtitleGate === "ready" && !playing) ? (
+                <div
+                  className={`subtitle-gate ${subtitleGate === "ready" ? "ready" : "preparing"}`}
+                  aria-live="polite"
+                >
+                  {subtitleGate === "preparing" ? (
+                    <>
+                      <strong>Preparing subtitles…</strong>
+                      <span>
+                        Buffering near playhead · {bufferStatus.cueCountInWindow} cues ·{" "}
+                        {bufferStatus.coveredAhead.toFixed(1)}s / {BUFFER_AHEAD_TARGET_S}s ahead
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <strong>Ready — Play</strong>
+                      <span>Subtitles buffered · press Play when you want to watch</span>
+                    </>
+                  )}
+                </div>
+              ) : null}
               <div
-                className={`cue-overlay${activeCue ? " visible" : ""}${bilingual ? " bilingual" : ""}${
+                className={`cue-overlay${showOverlay ? " visible" : ""}${
                   activeCue?.uncertain ? " uncertain" : ""
                 }${activeCue?.provisional ? " provisional" : ""}`}
               >
                 {activeCue?.provisional ? <div className="cue-flag">provisional</div> : null}
-                {bilingual && activeCue?.text_zh ? <div className="cue-zh">{activeCue.text_zh}</div> : null}
-                <div className="cue-en">{activeCue?.text_en || ""}</div>
+                {bilingual && overlayZh ? <div className="cue-zh">{overlayZh}</div> : null}
+                {overlayEn ? (
+                  <div className="cue-en">{overlayEn}</div>
+                ) : bilingual ? null : overlayZh ? (
+                  <div className="cue-en">{overlayZh}</div>
+                ) : null}
               </div>
               <div className="transport">
                 <button type="button" className="secondary" onClick={() => seekBy(-10)}>
                   −10s
                 </button>
-                <button type="button" onClick={togglePlay}>
-                  {playing ? "Pause" : "Play"}
+                <button
+                  type="button"
+                  onClick={togglePlay}
+                  disabled={subtitleGate === "preparing" && !playing}
+                  title={
+                    subtitleGate === "preparing"
+                      ? "Wait until subtitles are buffered"
+                      : undefined
+                  }
+                >
+                  {playing ? "Pause" : subtitleGate === "ready" ? "Play" : "Play"}
                 </button>
                 <button type="button" className="secondary" onClick={() => seekBy(10)}>
                   +10s
@@ -697,6 +895,11 @@ export function App() {
                   {formatTime(playTime)}
                   {duration > 0 ? ` / ${formatTime(duration)}` : ""}
                 </span>
+                {subtitleGate === "preparing" ? (
+                  <span className="gate-hint">Preparing subtitles…</span>
+                ) : subtitleGate === "ready" && !playing ? (
+                  <span className="gate-hint">Ready — Play</span>
+                ) : null}
               </div>
             </>
           ) : (
@@ -739,17 +942,21 @@ export function App() {
                     ? error
                     : engineOk === false
                       ? "Sidecar not reachable. Click Retry engine (or restart npm run dev)."
-                      : status === "running"
-                        ? "Live OCR — provisional cues refine as context fills."
-                        : status === "paused"
-                          ? "Paused at playhead."
-                          : status === "done"
-                            ? "Done. Use Export for bilingual SRT / VTT / ASS — or Remove job to clear."
-                            : status === "cancelled"
-                              ? "Job cancelled. Process again when ready."
-                              : status === "error"
-                                ? "Fix the issue above, then Process again — or Remove job to clear."
-                                : "Pick a video, then Process. Cancel job stops work and clears recovery."}
+                      : subtitleGate === "preparing"
+                        ? `Preparing subtitles… ${bufferStatus.cueCountInWindow} cues, ${bufferStatus.coveredAhead.toFixed(1)}s ahead of playhead.`
+                        : subtitleGate === "ready" && !playing
+                          ? "Ready — Play when you want. OCR keeps refining in the background."
+                          : status === "running"
+                            ? "Live OCR — provisional cues refine as context fills."
+                            : status === "paused"
+                              ? "Paused at playhead."
+                              : status === "done"
+                                ? "Done. Use Export for bilingual SRT / VTT / ASS — or Remove job to clear."
+                                : status === "cancelled"
+                                  ? "Job cancelled. Process again when ready."
+                                  : status === "error"
+                                    ? "Fix the issue above, then Process again — or Remove job to clear."
+                                    : "Pick a video, then Process. Playback waits until subtitles are buffered."}
                 </span>
               </div>
 
