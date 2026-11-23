@@ -23,6 +23,16 @@ export interface Cue {
     notes?: string;
     disagreement?: boolean;
   };
+  revisions?: Array<{
+    revision_id?: string;
+    text_en?: string;
+    text_zh?: string;
+    previous_en?: string | null;
+    reason?: string;
+    maturity?: string;
+    provisional?: boolean;
+    approved?: boolean;
+  }>;
 }
 
 export interface AudioVerifyStatus {

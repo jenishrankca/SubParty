@@ -15,6 +15,7 @@ bin/ffmpeg.exe
 bin/ffprobe.exe
 samples/*
 !samples/.gitkeep
+!samples/README.md
 !samples/demo_zh_hardsub.mp4
 _refs/
 .vscode/

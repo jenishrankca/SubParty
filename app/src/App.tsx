@@ -16,6 +16,9 @@ import {
   type EngineInfo,
   type GlossaryData,
 } from "./api";
+import { CueInspector } from "./CueInspector";
+import { TimelineRail } from "./TimelineRail";
+import { computeQualitySummary, processingStages } from "./workspaceStats";
 
 type JobStatus = "idle" | "queued" | "running" | "paused" | "done" | "error" | "cancelled";
 
@@ -162,8 +165,8 @@ export function App() {
   const [gEn, setGEn] = useState("");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [editCue, setEditCue] = useState<Cue | null>(null);
-  const [panel, setPanel] = useState<"job" | "glossary" | "timeline" | "qa" | "batch" | "models">(
-    "job"
+  const [panel, setPanel] = useState<"inspect" | "job" | "glossary" | "timeline" | "qa" | "batch" | "models">(
+    "inspect"
   );
   const [batchNote, setBatchNote] = useState<string | null>(null);
   const [batchId, setBatchId] = useState<string | null>(null);
@@ -188,6 +191,8 @@ export function App() {
   >([]);
   const [mergeStart, setMergeStart] = useState<number | null>(null);
   const [recovery, setRecovery] = useState<Array<Record<string, unknown>>>([]);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [processNote, setProcessNote] = useState<string | null>(null);
   const [audioVerify, setAudioVerify] = useState(false);
   const [audioReady, setAudioReady] = useState<AudioVerifyStatus | null>(null);
   const [audioSummary, setAudioSummary] = useState<AudioSummary | null>(null);
@@ -776,11 +781,13 @@ export function App() {
           if (typeof data.buffer_ahead === "number") setBufferAhead(data.buffer_ahead);
           if (typeof data.sample_interval === "number") setSampleInterval(data.sample_interval);
           if (typeof data.series_id === "string") setSeriesId(data.series_id);
+          if (typeof data.note === "string") setProcessNote(data.note);
           setStatus("running");
         } else if (type === "audio") {
           if (data.audio && typeof data.audio === "object") {
             setAudioSummary(data.audio as AudioSummary);
           }
+          setProcessNote("audio-verify");
         } else if (type === "status" || type === "done" || type === "error") {
           if (typeof data.status === "string") setStatus(data.status as JobStatus);
           if (typeof data.progress === "number") setProgress(data.progress);
@@ -788,9 +795,11 @@ export function App() {
           if (typeof data.error === "string") setError(data.error);
           if (typeof data.srt_path === "string") setSrtPath(data.srt_path);
           if (typeof data.series_id === "string") setSeriesId(data.series_id);
+          if (typeof data.note === "string") setProcessNote(data.note);
           if (data.audio && typeof data.audio === "object") {
             setAudioSummary(data.audio as AudioSummary);
           }
+          if (type === "done") setProcessNote(null);
         } else if (type === "end") {
           es.close();
         }
@@ -961,95 +970,146 @@ export function App() {
   }
 
   const pct = Math.round(progress * 100);
+  const quality = useMemo(() => computeQualitySummary(cues), [cues]);
+  const stages = useMemo(
+    () =>
+      processingStages(status, {
+        note: processNote,
+        audioVerify,
+        audioDone: Boolean(audioSummary && audioSummary.ok !== undefined),
+        progress,
+      }),
+    [status, processNote, audioVerify, audioSummary, progress]
+  );
 
   return (
-    <div className="app">
+    <div className="app workspace">
       <header className="topbar">
         <div className="brand">
           SubParty
-          <span>ZH hardsub → EN softsub</span>
+          <span>subtitle studio</span>
         </div>
-        <div className="actions">
-          <select
-            value={engineId}
-            onChange={(e) => setEngineId(e.target.value)}
-            title="Translation engine"
-          >
-            {(engines.length ? engines : [{ id: "argos", name: "Argos", available: true }]).map((e) => (
-              <option key={e.id} value={e.id} disabled={e.available === false}>
-                {e.name}
-                {e.available === false ? " (unavailable)" : ""}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => void retryEngine()}
-            disabled={busy}
-            title="Restart Python engine sidecar"
-          >
-            Retry engine
-          </button>
-          <button type="button" className="secondary" onClick={() => void pickVideo()}>
-            Pick video
-          </button>
-          <button type="button" className="secondary" onClick={() => void pickBatch()} disabled={busy}>
-            Batch
-          </button>
-          <label className="audio-toggle" title="EOF Chinese ASR vs OCR — never overwrites OCR">
-            <input
-              type="checkbox"
-              checked={audioVerify}
-              onChange={(e) => setAudioVerify(e.target.checked)}
-              disabled={busy || status === "running" || status === "paused" || status === "queued"}
-            />
-            Audio verify
-            {audioReady?.ready === false ? " (install ASR)" : ""}
-          </label>
-          <button
-            type="button"
-            onClick={() => void startProcess()}
-            disabled={!videoPath || busy || status === "running" || engineOk === false}
-          >
-            {status === "running" ? "Live OCR…" : "Process"}
-          </button>
-          {status === "running" ? (
-            <button type="button" className="secondary" onClick={() => void pauseJob()}>
-              Pause
+        <div className="toolbar-groups">
+          <div className="tool-group" data-label="Project">
+            <button type="button" className="secondary" onClick={() => void pickVideo()}>
+              Open
             </button>
-          ) : null}
-          {status === "paused" ? (
-            <button type="button" onClick={() => void resumeJob()}>
-              Resume
+            <button type="button" className="secondary" onClick={() => void pickBatch()} disabled={busy}>
+              Batch
             </button>
-          ) : null}
-          {jobId || status === "running" || status === "paused" || status === "queued" ? (
+            <button type="button" className="secondary" onClick={() => void openFolder()} disabled={!videoPath}>
+              Folder
+            </button>
+          </div>
+          <div className="tool-group" data-label="Language">
+            <select
+              value={engineId}
+              onChange={(e) => setEngineId(e.target.value)}
+              title="Translation engine"
+            >
+              {(engines.length ? engines : [{ id: "argos", name: "Argos", available: true }]).map((e) => (
+                <option key={e.id} value={e.id} disabled={e.available === false}>
+                  {e.name}
+                  {e.available === false ? " (unavailable)" : ""}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="secondary" onClick={() => setBilingual((v) => !v)}>
+              {bilingual ? "ZH+EN" : "EN"}
+            </button>
+          </div>
+          <div className="tool-group" data-label="Audio">
+            <label className="audio-toggle" title="EOF Chinese ASR vs OCR — never overwrites OCR">
+              <input
+                type="checkbox"
+                checked={audioVerify}
+                onChange={(e) => setAudioVerify(e.target.checked)}
+                disabled={busy || status === "running" || status === "paused" || status === "queued"}
+              />
+              Verify
+              {audioReady?.ready === false ? " (install)" : ""}
+            </label>
+          </div>
+          <div className="tool-group" data-label="Run">
             <button
               type="button"
-              className="danger"
-              onClick={() => void cancelOrRemoveJob()}
-              disabled={busy}
-              title="Stop processing and remove this job (also deletes recovery snapshot)"
+              onClick={() => void startProcess()}
+              disabled={!videoPath || busy || status === "running" || engineOk === false}
             >
-              {status === "running" || status === "paused" || status === "queued"
-                ? "Cancel job"
-                : "Remove job"}
+              {status === "running" ? "Live…" : "Process"}
             </button>
-          ) : null}
-          <button type="button" className="secondary" onClick={() => void exportAll()} disabled={!jobId}>
-            Export
-          </button>
-          <button type="button" className="secondary" onClick={() => void openFolder()} disabled={!videoPath}>
-            Open folder
-          </button>
-          <button type="button" className="secondary" onClick={() => setBilingual((v) => !v)}>
-            {bilingual ? "ZH+EN" : "EN only"}
-          </button>
+            {status === "running" ? (
+              <button type="button" className="secondary" onClick={() => void pauseJob()}>
+                Pause
+              </button>
+            ) : null}
+            {status === "paused" ? (
+              <button type="button" onClick={() => void resumeJob()}>
+                Resume
+              </button>
+            ) : null}
+            {jobId || status === "running" || status === "paused" || status === "queued" ? (
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void cancelOrRemoveJob()}
+                disabled={busy}
+              >
+                {status === "running" || status === "paused" || status === "queued" ? "Cancel" : "Remove"}
+              </button>
+            ) : null}
+          </div>
+          <div className="tool-group" data-label="Export">
+            <button type="button" className="secondary" onClick={() => void exportAll()} disabled={!jobId}>
+              Export
+            </button>
+          </div>
+          <div className="tool-group" data-label="Settings">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => void retryEngine()}
+              disabled={busy}
+              title="Restart Python engine sidecar"
+            >
+              Engine
+            </button>
+            <button type="button" className="secondary" onClick={() => setPanel("models")}>
+              Models
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="main">
+      <div className="stage-strip" aria-label="Processing stages">
+        {stages.map((s) => (
+          <div key={s.id} className={`stage${s.active ? " active" : ""}${s.done ? " done" : ""}`}>
+            {s.label}
+          </div>
+        ))}
+        <div className="stage-progress">
+          {status === "idle" ? "Idle" : `${status}${engineOk ? "" : " · engine offline"}`}
+          {status === "running" || status === "paused" ? ` · ${pct}%` : ""}
+          {processNote ? ` · ${processNote}` : ""}
+        </div>
+      </div>
+
+      <div className="quality-strip" aria-label="Quality summary from cue fields">
+        <span>{quality.cueCount} cues</span>
+        <span>{quality.uncertain} uncertain</span>
+        <span>{quality.missingEn} missing EN</span>
+        <span>{quality.overlaps} overlaps</span>
+        <span>{quality.audioDisagreements} audio disagree</span>
+        <span>{quality.provisional} provisional</span>
+        {Object.entries(quality.maturity).map(([k, v]) => (
+          <span key={k}>
+            {k}:{v}
+          </span>
+        ))}
+      </div>
+
+      <div className="main workspace-main">
+        <div className="workspace-center">
         <section className="player-wrap">
           {videoUrl ? (
             <>
@@ -1137,9 +1197,30 @@ export function App() {
           )}
         </section>
 
+        <TimelineRail
+          cues={cues}
+          duration={duration}
+          playTime={playTime}
+          selectedCueId={editCue?.cue_id}
+          selectedStart={editCue?.start}
+          videoUrl={videoUrl}
+          onSeek={(t) => {
+            const v = videoRef.current;
+            if (v) {
+              v.currentTime = t;
+              setPlayTime(t);
+            }
+          }}
+          onSelectCue={(c) => {
+            setEditCue({ ...c });
+            setPanel("inspect");
+          }}
+        />
+        </div>
+
         <aside className="side">
           <div className="tabs">
-            {(["job", "timeline", "qa", "glossary", "batch", "models"] as const).map((p) => (
+            {(["inspect", "job", "qa", "glossary", "batch", "models"] as const).map((p) => (
               <button
                 key={p}
                 type="button"
@@ -1158,6 +1239,24 @@ export function App() {
               </button>
             ))}
           </div>
+
+          {panel === "inspect" ? (
+            <CueInspector
+              cue={editCue}
+              bilingual={bilingual}
+              busy={busy}
+              onChange={setEditCue}
+              onSave={() => void saveEditCue()}
+              onCancel={() => setEditCue(null)}
+              onSplit={() => void splitEditCue()}
+              onMarkMerge={() => editCue && setMergeStart(editCue.start)}
+              onJump={() => {
+                if (!editCue || !videoRef.current) return;
+                videoRef.current.currentTime = editCue.start;
+                setPlayTime(editCue.start);
+              }}
+            />
+          ) : null}
 
           {panel === "job" ? (
             <>
@@ -1319,6 +1418,9 @@ export function App() {
                 <>
                   <h2>
                     Unfinished jobs
+                    <button type="button" className="linkish" onClick={() => setRecoveryOpen((v) => !v)}>
+                      {recovery.length} · {recoveryOpen ? "hide" : "show"}
+                    </button>
                     <button
                       type="button"
                       className="linkish"
@@ -1329,28 +1431,30 @@ export function App() {
                       Discard all
                     </button>
                   </h2>
-                  <ul className="cue-list">
-                    {recovery.slice(0, 8).map((r) => (
-                      <li key={String(r.id)}>
-                        <div className="t">
-                          {String(r.status)} · {String(r.id).slice(0, 8)}
-                        </div>
-                        <div className="en">{String(r.video_path)}</div>
-                        <button type="button" className="linkish" onClick={() => void resumeRecovery(r)}>
-                          Resume
-                        </button>
-                        <button
-                          type="button"
-                          className="linkish"
-                          onClick={() => void discardRecovery(r)}
-                          disabled={busy}
-                          style={{ marginLeft: "0.75rem", color: "var(--danger)" }}
-                        >
-                          Discard
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  {recoveryOpen ? (
+                    <ul className="cue-list">
+                      {recovery.slice(0, 8).map((r) => (
+                        <li key={String(r.id)}>
+                          <div className="t">
+                            {String(r.status)} · {String(r.id).slice(0, 8)}
+                          </div>
+                          <div className="en">{String(r.video_path)}</div>
+                          <button type="button" className="linkish" onClick={() => void resumeRecovery(r)}>
+                            Resume
+                          </button>
+                          <button
+                            type="button"
+                            className="linkish"
+                            onClick={() => void discardRecovery(r)}
+                            disabled={busy}
+                            style={{ marginLeft: "0.75rem", color: "var(--danger)" }}
+                          >
+                            Discard
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </>
               ) : null}
 
@@ -1927,3 +2031,4 @@ export function App() {
     </div>
   );
 }
+
