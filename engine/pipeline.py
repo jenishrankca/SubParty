@@ -16,7 +16,7 @@ from ffmpeg_util import extract_region, probe_duration, probe_size
 from glossary import glossary_for_video
 from ocr import ocr_lines, warm_ocr
 from region import SubtitleRegion, default_bottom_region, detect_subtitle_region
-from srt_writer import Cue, SrtWriter
+from srt_writer import Cue, SrtWriter, merge_cue_payloads
 from text_filters import filter_ocr_lines
 from translate import warm_translate
 
@@ -423,24 +423,27 @@ class JobManager:
             en = zh
 
         cue = Cue(index=serial, start=start, end=end, text_zh=zh, text_en=en)
-        writer.upsert_and_rewrite(cue)
+        stored = writer.upsert_and_rewrite(cue)
         payload = {
-            "index": cue.index,
-            "start": cue.start,
-            "end": cue.end,
-            "text_zh": cue.text_zh,
-            "text_en": cue.text_en,
+            "index": stored.index,
+            "start": stored.start,
+            "end": stored.end,
+            "text_zh": stored.text_zh,
+            "text_en": stored.text_en,
+            "confidence": float(getattr(stored, "confidence", 1.0) or 1.0),
+            "uncertain": bool(getattr(stored, "uncertain", False)),
         }
-        job.cues = sorted(
-            [
-                c
-                for c in job.cues
-                if not (abs(float(c["start"]) - start) < 0.05 and c["text_zh"] == zh)
-            ]
-            + [payload],
-            key=lambda c: float(c["start"]),
-        )
+        job.cues = merge_cue_payloads(job.cues, payload)
         job.cue_count = len(job.cues)
+        # Re-sync payload index after merge renumber
+        for c in job.cues:
+            if (
+                abs(float(c["start"]) - stored.start) < 1e-6
+                and c.get("text_zh") == stored.text_zh
+                and c.get("text_en") == stored.text_en
+            ):
+                payload = dict(c)
+                break
         self._emit(
             job,
             {"type": "cue", "cue": payload, "cue_count": job.cue_count, "srt_path": job.srt_path},
