@@ -18,6 +18,21 @@ from pydantic import BaseModel, Field
 from engines import list_engines, set_active_engine
 from exports import export_job_formats
 from ffmpeg_util import ffmpeg_path, ffprobe_path
+from batch_store import (
+    create_batch_manifest,
+    failed_job_rows,
+    list_batches,
+    load_batch,
+    mark_job_status_from_live,
+    save_batch,
+    update_batch_job,
+)
+from characters import (
+    Character,
+    list_character_sheets,
+    load_character_sheet,
+    sync_glossary_into_sheet,
+)
 from glossary import (
     glossary_for_video,
     invalidate_glossary_cache,
@@ -26,7 +41,7 @@ from glossary import (
     series_id_from_video,
     suggest_character_terms,
 )
-from qa_report import build_qa_report
+from qa_report import build_qa_report, export_qa_html
 from job_store import (
     delete_snapshot,
     delete_snapshot_file,
@@ -129,6 +144,45 @@ class ExportRequest(BaseModel):
 
 class QaReportRequest(BaseModel):
     gold_cues: list[dict[str, Any]] | None = None
+    gold_path: str | None = None
+    export_html: bool = False
+
+
+class CueSplitRequest(BaseModel):
+    cue_id: str | None = None
+    start: float | None = None
+    at: float | None = None
+    left_zh: str | None = None
+    right_zh: str | None = None
+    left_en: str | None = None
+    right_en: str | None = None
+
+
+class CueMergeRequest(BaseModel):
+    cue_id_a: str | None = None
+    cue_id_b: str | None = None
+    start_a: float | None = None
+    start_b: float | None = None
+
+
+class CharacterUpsertRequest(BaseModel):
+    series_id: str = Field(..., min_length=1)
+    zh: str = Field(..., min_length=1)
+    en: str = ""
+    aliases: list[str] = []
+    notes: str = ""
+    role: str = ""
+    sync_glossary: bool = True
+    video_path: str | None = None
+
+
+class CharacterDeleteRequest(BaseModel):
+    series_id: str = Field(..., min_length=1)
+    zh: str = Field(..., min_length=1)
+
+
+class BatchRetryRequest(BaseModel):
+    engine_id: str | None = None
 
 
 class ModelEnsureRequest(BaseModel):
@@ -269,28 +323,56 @@ def start_batch(body: BatchJobRequest) -> dict[str, Any]:
                 engine_id=body.engine_id,
                 batch_id=batch_id,
             )
-            created.append({"id": job.id, "video_path": job.video_path, "status": job.status})
+            created.append(
+                {
+                    "id": job.id,
+                    "video_path": job.video_path,
+                    "status": job.status,
+                    "progress": job.progress,
+                    "cue_count": job.cue_count,
+                    "srt_path": job.srt_path,
+                    "error": None,
+                    "batch_id": batch_id,
+                }
+            )
         except Exception as exc:
-            created.append({"video_path": vp, "error": str(exc)})
-    return {"batch_id": batch_id, "jobs": created}
+            created.append(
+                {
+                    "id": None,
+                    "video_path": vp,
+                    "status": "error",
+                    "error": str(exc),
+                    "progress": 0,
+                    "cue_count": 0,
+                    "batch_id": batch_id,
+                }
+            )
+    create_batch_manifest(
+        video_paths=body.video_paths,
+        engine_id=body.engine_id,
+        fps=body.fps,
+        lookahead=body.lookahead,
+        job_rows=created,
+        batch_id=batch_id,
+    )
+    return {"batch_id": batch_id, "jobs": created, "durable": True}
+
+
+@app.get("/jobs/batches")
+def batches_index() -> dict[str, Any]:
+    return {"batches": list_batches()}
 
 
 @app.get("/jobs/batch/{batch_id}")
 def batch_status(batch_id: str) -> dict[str, Any]:
-    """Stage 9 — aggregate production status for a batch."""
+    """Stage 9 — aggregate production status (live + durable manifest)."""
+    mark_job_status_from_live(batch_id, jobs.list_jobs())
+    durable = load_batch(batch_id)
     matched = [j for j in jobs.list_jobs() if getattr(j, "batch_id", None) == batch_id]
-    by_status: dict[str, int] = {}
-    for j in matched:
-        by_status[j.status] = by_status.get(j.status, 0) + 1
-    done = by_status.get("done", 0)
-    total = len(matched)
-    return {
-        "batch_id": batch_id,
-        "total": total,
-        "by_status": by_status,
-        "progress": (done / total) if total else 0.0,
-        "complete": total > 0 and done + by_status.get("error", 0) + by_status.get("cancelled", 0) >= total,
-        "jobs": [
+    if durable and durable.get("jobs"):
+        rows = list(durable["jobs"])
+    else:
+        rows = [
             {
                 "id": j.id,
                 "status": j.status,
@@ -303,8 +385,116 @@ def batch_status(batch_id: str) -> dict[str, Any]:
                 "audio_disagreements": (getattr(j, "audio_summary", None) or {}).get("disagreements"),
             }
             for j in matched
-        ],
+        ]
+    by_status: dict[str, int] = {}
+    for row in rows:
+        st = str(row.get("status") or "unknown")
+        by_status[st] = by_status.get(st, 0) + 1
+    done = by_status.get("done", 0)
+    total = len(rows)
+    return {
+        "batch_id": batch_id,
+        "total": total,
+        "by_status": by_status,
+        "progress": (done / total) if total else 0.0,
+        "complete": total > 0
+        and done + by_status.get("error", 0) + by_status.get("cancelled", 0) >= total,
+        "durable": durable is not None,
+        "jobs": rows,
     }
+
+
+@app.post("/jobs/batch/{batch_id}/retry")
+def batch_retry_failed(batch_id: str, body: BatchRetryRequest | None = None) -> dict[str, Any]:
+    """Re-queue failed/cancelled jobs from durable batch manifest."""
+    durable = load_batch(batch_id)
+    if not durable:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    engine_id = (body.engine_id if body and body.engine_id else None) or str(
+        durable.get("engine_id") or "argos"
+    )
+    fps = float(durable.get("fps") or 1.0)
+    lookahead = float(durable.get("lookahead") or 12.0)
+    retried: list[dict[str, Any]] = []
+    for row in failed_job_rows(batch_id):
+        vp = str(row.get("video_path") or "")
+        if not vp:
+            continue
+        try:
+            set_active_engine(engine_id)
+            job = jobs.create(
+                vp,
+                fps=fps,
+                lookahead=lookahead,
+                playhead=0.0,
+                engine_id=engine_id,
+                batch_id=batch_id,
+            )
+            update_batch_job(
+                batch_id,
+                str(row.get("id") or ""),
+                id=job.id,
+                status=job.status,
+                progress=0,
+                error=None,
+                cue_count=0,
+                srt_path=job.srt_path,
+            )
+            # Also append if old id missing
+            if not row.get("id"):
+                durable2 = load_batch(batch_id) or durable
+                durable2.setdefault("jobs", []).append(
+                    {
+                        "id": job.id,
+                        "video_path": vp,
+                        "status": job.status,
+                        "batch_id": batch_id,
+                    }
+                )
+                save_batch(durable2)
+            retried.append({"id": job.id, "video_path": vp, "status": job.status})
+        except Exception as exc:
+            retried.append({"video_path": vp, "error": str(exc), "status": "error"})
+    return {"ok": True, "batch_id": batch_id, "retried": retried}
+
+
+@app.post("/jobs/batch/{batch_id}/export")
+def batch_export_all(batch_id: str, body: ExportRequest | None = None) -> dict[str, Any]:
+    """Export subtitle formats for every done job in the batch."""
+    mark_job_status_from_live(batch_id, jobs.list_jobs())
+    durable = load_batch(batch_id)
+    if not durable:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    opts = body or ExportRequest()
+    exported: list[dict[str, Any]] = []
+    for row in durable.get("jobs") or []:
+        if str(row.get("status") or "") != "done":
+            continue
+        jid = str(row.get("id") or "")
+        job = jobs.get(jid) if jid else None
+        cues = list(job.cues) if job else []
+        video = str((job.video_path if job else None) or row.get("video_path") or "")
+        if not video:
+            continue
+        if not cues and job is None:
+            # try snapshot
+            from job_store import load_job_snapshot, snapshot_path_for
+
+            snap = load_job_snapshot(snapshot_path_for(jid, video)) if jid else None
+            if snap:
+                cues = list(snap.get("cues") or [])
+        if not cues:
+            exported.append({"id": jid, "video_path": video, "error": "no cues"})
+            continue
+        paths = export_job_formats(
+            video,
+            cues,
+            bilingual_srt=opts.bilingual_srt,
+            vtt=opts.vtt,
+            ass=opts.ass,
+        )
+        exported.append({"id": jid, "video_path": video, "paths": paths})
+    return {"ok": True, "batch_id": batch_id, "exported": exported}
 
 
 @app.get("/jobs")
@@ -314,20 +504,43 @@ def list_jobs() -> dict[str, Any]:
 
 @app.post("/jobs/{job_id}/qa")
 def job_qa_report(job_id: str, body: QaReportRequest | None = None) -> dict[str, Any]:
-    """Stage 7 — independent QA scores for a job (optional gold cues)."""
+    """Stage 7 — independent QA scores (optional gold cues / gold_path JSON)."""
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    gold = body.gold_cues if body else None
-    return build_qa_report(job=job, gold_cues=gold)
+    try:
+        report = build_qa_report(
+            job=job,
+            gold_cues=body.gold_cues if body else None,
+            gold_path=body.gold_path if body else None,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if body and body.export_html:
+        path = export_qa_html(report, job_id=job_id)
+        report["report_html"] = str(path)
+        report["report_json"] = str(path.with_suffix(".json"))
+    return report
 
 
 @app.get("/jobs/{job_id}/qa")
-def job_qa_report_get(job_id: str) -> dict[str, Any]:
+def job_qa_report_get(job_id: str, gold_path: str | None = None, export_html: bool = False) -> dict[str, Any]:
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return build_qa_report(job=job)
+    try:
+        report = build_qa_report(job=job, gold_path=gold_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if export_html:
+        path = export_qa_html(report, job_id=job_id)
+        report["report_html"] = str(path)
+        report["report_json"] = str(path.with_suffix(".json"))
+    return report
 
 
 @app.get("/jobs/{job_id}", response_model=JobResponse)
@@ -389,6 +602,28 @@ def patch_cue(job_id: str, body: CueUpdateRequest) -> dict[str, Any]:
     if updated is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"ok": True, "cue": updated}
+
+
+@app.post("/jobs/{job_id}/cues/split")
+def split_job_cue(job_id: str, body: CueSplitRequest) -> dict[str, Any]:
+    try:
+        cues = jobs.split_cue(job_id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if cues is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"ok": True, "cue_count": len(cues), "cues": cues}
+
+
+@app.post("/jobs/{job_id}/cues/merge")
+def merge_job_cues(job_id: str, body: CueMergeRequest) -> dict[str, Any]:
+    try:
+        cues = jobs.merge_cues(job_id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if cues is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"ok": True, "cue_count": len(cues), "cues": cues}
 
 
 @app.post("/jobs/{job_id}/export")
@@ -453,6 +688,55 @@ def glossary_suggest(video_path: str | None = None, job_id: str | None = None) -
         existing = g.terms
     suggestions = suggest_character_terms(cues, existing=existing)
     return {"series_id": sid, "suggestions": suggestions, "existing_count": len(existing)}
+
+
+@app.get("/characters")
+def characters_index() -> dict[str, Any]:
+    return {"sheets": list_character_sheets()}
+
+
+@app.get("/characters/{series_id}")
+def get_characters(series_id: str) -> dict[str, Any]:
+    return load_character_sheet(series_id).as_dict()
+
+
+@app.post("/characters")
+def upsert_character(body: CharacterUpsertRequest) -> dict[str, Any]:
+    sheet = load_character_sheet(body.series_id)
+    sheet.upsert(
+        Character(
+            zh=body.zh,
+            en=body.en,
+            aliases=list(body.aliases or []),
+            notes=body.notes,
+            role=body.role,
+        )
+    )
+    if body.sync_glossary and body.en:
+        vp = body.video_path
+        if vp:
+            g = glossary_for_video(vp)
+            g.remember(body.zh, body.en)
+    return sheet.as_dict()
+
+
+@app.delete("/characters")
+def delete_character(body: CharacterDeleteRequest) -> dict[str, Any]:
+    sheet = load_character_sheet(body.series_id)
+    sheet.delete(body.zh)
+    return sheet.as_dict()
+
+
+@app.post("/characters/{series_id}/sync-glossary")
+def sync_characters_from_glossary(series_id: str, video_path: str | None = None) -> dict[str, Any]:
+    terms: dict[str, str] = {}
+    if video_path:
+        terms = glossary_for_video(video_path).terms
+    else:
+        # fall back: empty — still returns sheet
+        terms = {}
+    sheet = sync_glossary_into_sheet(series_id, terms)
+    return sheet.as_dict()
 
 
 @app.post("/glossary/term")

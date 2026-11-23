@@ -47,6 +47,24 @@ def models_dir() -> Path:
     return d
 
 
+def reports_dir() -> Path:
+    d = app_data_dir() / "reports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def batches_dir() -> Path:
+    d = app_data_dir() / "batches"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def characters_dir() -> Path:
+    d = app_data_dir() / "characters"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def token_path() -> Path:
     return app_data_dir() / "engine.token"
 
