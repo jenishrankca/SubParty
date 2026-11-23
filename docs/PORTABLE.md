@@ -36,6 +36,8 @@ or `cd app && npm run dev`.
 - API calls (except `/health`) require `Authorization: Bearer <token>` (SSE uses `?token=`).
 - Engine binds `127.0.0.1:18765` only.
 - **webSecurity:** enabled. Local video uses privileged `subparty://media/...` protocol (not `webSecurity: false`).
+- **Engine IPC:** renderer health + REST go through Electron `engine-fetch` / `engine-health` (avoids browser CORS “Failed to fetch” when the sidecar is slow to bind). SSE still uses `http://127.0.0.1:18765` with `?token=`.
+- **Startup:** Electron frees stale listeners on `:18765`, refuses `0.x` health, respawns the venv python, and exposes **Retry engine** in the UI.
 - **Residual risk:** the custom scheme can read any path the app user can access if a compromised renderer crafted URLs; preload still has no Node integration, and paths normally come only from the file picker / IPC. Do not load untrusted remote pages in the BrowserWindow.
 
 ## Packaging path (working)

@@ -6,5 +6,8 @@ contextBridge.exposeInMainWorld("subparty", {
   openFolder: (targetPath) => ipcRenderer.invoke("open-folder", targetPath),
   engineUrl: () => ipcRenderer.invoke("engine-url"),
   engineToken: () => ipcRenderer.invoke("engine-token"),
+  engineHealth: () => ipcRenderer.invoke("engine-health"),
+  engineRestart: () => ipcRenderer.invoke("engine-restart"),
+  engineFetch: (pathName, init) => ipcRenderer.invoke("engine-fetch", pathName, init),
   pathToFileUrl: (filePath) => ipcRenderer.invoke("path-to-file-url", filePath),
 });

@@ -1,9 +1,10 @@
 const { app, BrowserWindow, dialog, ipcMain, shell, protocol, net } = require("electron");
 const path = require("path");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 const http = require("http");
 const fs = require("fs");
 const { pathToFileURL } = require("url");
+const crypto = require("crypto");
 
 const ENGINE_PORT = 18765;
 const ENGINE_URL = `http://127.0.0.1:${ENGINE_PORT}`;
@@ -12,8 +13,8 @@ const isDev = !app.isPackaged;
 let mainWindow = null;
 let engineProc = null;
 let engineToken = "";
+let engineStarting = false;
 
-// Custom scheme so renderer can play local videos with webSecurity: true
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "subparty",
@@ -36,17 +37,26 @@ function tokenPath() {
   return path.join(projectRoot(), ".subparty", "engine.token");
 }
 
-function readToken() {
+function ensureToken() {
+  const tp = tokenPath();
+  fs.mkdirSync(path.dirname(tp), { recursive: true });
+  let raw = "";
   try {
-    const p = tokenPath();
-    if (fs.existsSync(p)) {
-      engineToken = fs.readFileSync(p, "utf8").trim();
-      return engineToken;
-    }
-  } catch (err) {
-    console.error("[engine] token read failed", err);
+    if (fs.existsSync(tp)) raw = fs.readFileSync(tp, "utf8").trim();
+  } catch {
+    raw = "";
   }
-  return "";
+  // Reject leftover short/test tokens from debugging
+  if (!raw || raw.length < 20 || raw === "test-fix-token") {
+    raw = crypto.randomBytes(32).toString("base64url");
+    fs.writeFileSync(tp, raw, "utf8");
+  }
+  engineToken = raw;
+  return engineToken;
+}
+
+function readToken() {
+  return ensureToken();
 }
 
 function resolvePython() {
@@ -55,110 +65,200 @@ function resolvePython() {
   return process.env.SUBPARTY_PYTHON || "python";
 }
 
-function freeEnginePort() {
-  // Stale sidecars (e.g. v0.2) on 18765 cause Process → /engines/select 404.
+function listeningPids() {
+  const pids = new Set();
+  if (process.platform !== "win32") return pids;
   try {
-    if (process.platform === "win32") {
-      const { execSync } = require("child_process");
-      const out = execSync(`netstat -ano | findstr :${ENGINE_PORT}`, {
-        encoding: "utf8",
-        windowsHide: true,
-      });
-      const pids = new Set();
-      for (const line of out.split(/\r?\n/)) {
-        if (!/LISTENING/i.test(line)) continue;
-        const parts = line.trim().split(/\s+/);
-        const pid = parts[parts.length - 1];
-        if (pid && /^\d+$/.test(pid) && pid !== "0") pids.add(pid);
-      }
-      for (const pid of pids) {
-        try {
-          execSync(`taskkill /PID ${pid} /F`, { windowsHide: true, stdio: "ignore" });
-          console.log(`[engine] killed stale pid ${pid} on :${ENGINE_PORT}`);
-        } catch {
-          /* ignore */
-        }
-      }
+    const out = execSync(`netstat -ano | findstr :${ENGINE_PORT}`, {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    for (const line of out.split(/\r?\n/)) {
+      if (!/LISTENING/i.test(line)) continue;
+      const parts = line.trim().split(/\s+/);
+      const pid = parts[parts.length - 1];
+      if (pid && /^\d+$/.test(pid) && pid !== "0") pids.add(Number(pid));
     }
   } catch {
-    /* nothing listening */
+    /* none */
+  }
+  return pids;
+}
+
+function freeEnginePort({ allowPid = null } = {}) {
+  const pids = listeningPids();
+  for (const pid of pids) {
+    if (allowPid && pid === allowPid) continue;
+    try {
+      execSync(`taskkill /PID ${pid} /F`, { windowsHide: true, stdio: "ignore" });
+      console.log(`[engine] killed pid ${pid} on :${ENGINE_PORT}`);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function sleepSync(ms) {
+  const sab = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(sab, 0, 0, ms);
+}
+
+function waitPortFree(timeoutMs = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (listeningPids().size === 0) return true;
+    sleepSync(200);
+  }
+  return listeningPids().size === 0;
+}
+
+function stopEngineProcess() {
+  const proc = engineProc;
+  engineProc = null;
+  if (!proc) return;
+  try {
+    if (process.platform === "win32" && proc.pid) {
+      execSync(`taskkill /PID ${proc.pid} /T /F`, { windowsHide: true, stdio: "ignore" });
+    } else {
+      proc.kill();
+    }
+  } catch {
+    /* ignore */
   }
 }
 
 function startEngine() {
-  if (engineProc) return;
-  freeEnginePort();
-  const py = resolvePython();
-  const engineDir = path.join(projectRoot(), "engine");
-  const mainPy = path.join(engineDir, "main.py");
-  const tp = tokenPath();
-  fs.mkdirSync(path.dirname(tp), { recursive: true });
-  if (!fs.existsSync(tp) || !fs.readFileSync(tp, "utf8").trim()) {
-    const crypto = require("crypto");
-    fs.writeFileSync(tp, crypto.randomBytes(32).toString("base64url"), "utf8");
+  if (engineProc || engineStarting) return;
+  engineStarting = true;
+  try {
+    // Clear strangers on the port before spawn — never kill after we own the child
+    freeEnginePort();
+    waitPortFree(4000);
+    const py = resolvePython();
+    const engineDir = path.join(projectRoot(), "engine");
+    const mainPy = path.join(engineDir, "main.py");
+    const token = ensureToken();
+    console.log(`[engine] spawning ${py} (token ${token.slice(0, 6)}…)`);
+    engineProc = spawn(py, ["-u", mainPy], {
+      cwd: engineDir,
+      env: {
+        ...process.env,
+        PYTHONUTF8: "1",
+        PYTHONUNBUFFERED: "1",
+        SUBPARTY_ENGINE_TOKEN: token,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const childPid = engineProc.pid;
+    engineProc.stdout.on("data", (d) => console.log(`[engine] ${d}`));
+    engineProc.stderr.on("data", (d) => console.error(`[engine] ${d}`));
+    engineProc.on("exit", (code) => {
+      console.log(`[engine] exited ${code} (pid ${childPid})`);
+      if (engineProc && engineProc.pid === childPid) engineProc = null;
+    });
+  } finally {
+    engineStarting = false;
   }
-  engineToken = readToken();
-  engineProc = spawn(py, [mainPy], {
-    cwd: engineDir,
-    env: {
-      ...process.env,
-      PYTHONUTF8: "1",
-      SUBPARTY_ENGINE_TOKEN: engineToken,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  engineProc.stdout.on("data", (d) => console.log(`[engine] ${d}`));
-  engineProc.stderr.on("data", (d) => console.error(`[engine] ${d}`));
-  engineProc.on("exit", (code) => {
-    console.log(`[engine] exited ${code}`);
-    engineProc = null;
+}
+
+function restartEngine() {
+  const previous = engineProc;
+  stopEngineProcess();
+  // Only reclaim strangers — our child was already taskkilled
+  freeEnginePort({ allowPid: previous && previous.pid ? previous.pid : null });
+  waitPortFree(4000);
+  startEngine();
+}
+
+function httpGetJson(urlPath, timeoutMs = 2500) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(`${ENGINE_URL}${urlPath}`, { timeout: timeoutMs }, (res) => {
+      let raw = "";
+      res.on("data", (c) => {
+        raw += c;
+      });
+      res.on("end", () => {
+        resolve({ status: res.statusCode || 0, raw });
+      });
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("timeout"));
+    });
+    req.on("error", reject);
   });
 }
 
-function waitForEngine(timeoutMs = 60000) {
-  const start = Date.now();
+function httpJson(method, urlPath, bodyObj, token) {
   return new Promise((resolve, reject) => {
-    const tick = () => {
-      const req = http.get(`${ENGINE_URL}/health`, (res) => {
+    const body = bodyObj === undefined ? null : JSON.stringify(bodyObj);
+    const u = new URL(`${ENGINE_URL}${urlPath}`);
+    const req = http.request(
+      {
+        hostname: u.hostname,
+        port: u.port,
+        path: u.pathname + u.search,
+        method,
+        headers: {
+          ...(body ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        timeout: 120000,
+      },
+      (res) => {
         let raw = "";
         res.on("data", (c) => {
           raw += c;
         });
         res.on("end", () => {
-          if (res.statusCode !== 200) {
-            retry();
-            return;
-          }
-          try {
-            const body = JSON.parse(raw);
-            const ver = String(body.version || "");
-            // Require 2.x accuracy engine; otherwise kill and keep waiting for our spawn
-            if (ver.startsWith("0.")) {
-              console.error(`[engine] outdated sidecar ${ver} still on port — reclaiming`);
-              freeEnginePort();
-              if (!engineProc) startEngine();
-              retry();
-              return;
-            }
-          } catch {
-            /* accept opaque 200 */
-          }
-          readToken();
-          resolve(true);
+          resolve({ status: res.statusCode || 0, raw, ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300 });
         });
-      });
-      req.on("error", retry);
-      function retry() {
-        if (Date.now() - start > timeoutMs) {
-          reject(new Error("Engine did not become ready in time"));
-          return;
-        }
-        setTimeout(tick, 400);
       }
-    };
-    tick();
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("timeout"));
+    });
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
   });
+}
+
+async function waitForEngine(timeoutMs = 90000) {
+  const start = Date.now();
+  let attempt = 0;
+  while (Date.now() - start < timeoutMs) {
+    attempt += 1;
+    try {
+      const { status, raw } = await httpGetJson("/health", 3000);
+      if (status === 200) {
+        let ver = "";
+        try {
+          ver = String(JSON.parse(raw).version || "");
+        } catch {
+          ver = "";
+        }
+        if (ver.startsWith("0.")) {
+          console.error(`[engine] outdated ${ver} on port — restarting our sidecar`);
+          restartEngine();
+        } else {
+          ensureToken();
+          console.log(`[engine] ready version=${ver || "unknown"}`);
+          return true;
+        }
+      }
+    } catch (err) {
+      if (attempt === 1 || attempt % 10 === 0) {
+        console.log(`[engine] waiting… (${err && err.message ? err.message : err})`);
+      }
+      // If our child died, respawn
+      if (!engineProc && !engineStarting) startEngine();
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error("Engine did not become ready in time");
 }
 
 function createWindow() {
@@ -174,7 +274,6 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      // Local media via privileged `subparty://` protocol — keep Chromium webSecurity on.
       webSecurity: true,
     },
   });
@@ -187,11 +286,9 @@ function createWindow() {
 }
 
 function registerMediaProtocol() {
-  // subparty://media/<absolute-path>  → local file stream
   protocol.handle("subparty", (request) => {
     try {
       const u = new URL(request.url);
-      // Expect host "media" and pathname = absolute path (/C:/... or /Users/...)
       let filePath = decodeURIComponent(u.pathname || "");
       if (process.platform === "win32" && filePath.startsWith("/")) {
         filePath = filePath.slice(1);
@@ -217,21 +314,32 @@ app.whenReady().then(async () => {
     console.error(err);
   }
   createWindow();
+  // Keep trying in background if startup timed out
+  if (!(await healthOk())) {
+    setInterval(() => {
+      if (!engineProc && !engineStarting) startEngine();
+    }, 4000);
+  }
 });
 
-app.on("window-all-closed", () => {
-  if (engineProc) {
-    engineProc.kill();
-    engineProc = null;
+async function healthOk() {
+  try {
+    const { status, raw } = await httpGetJson("/health", 2000);
+    if (status !== 200) return false;
+    const ver = String(JSON.parse(raw).version || "");
+    return !ver.startsWith("0.");
+  } catch {
+    return false;
   }
+}
+
+app.on("window-all-closed", () => {
+  stopEngineProcess();
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", () => {
-  if (engineProc) {
-    engineProc.kill();
-    engineProc = null;
-  }
+  stopEngineProcess();
 });
 
 ipcMain.handle("pick-video", async () => {
@@ -264,14 +372,61 @@ ipcMain.handle("open-folder", async (_e, targetPath) => {
 });
 
 ipcMain.handle("engine-url", async () => ENGINE_URL);
-ipcMain.handle("engine-token", async () => {
-  if (!engineToken) readToken();
-  return engineToken;
+ipcMain.handle("engine-token", async () => ensureToken());
+
+ipcMain.handle("engine-health", async () => {
+  try {
+    const { status, raw } = await httpGetJson("/health", 3000);
+    if (status !== 200) return { ok: false, error: `HTTP ${status}`, version: null };
+    const body = JSON.parse(raw);
+    return { ok: true, version: body.version || null, mode: body.mode || null, body };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err), version: null };
+  }
+});
+
+ipcMain.handle("engine-restart", async () => {
+  restartEngine();
+  try {
+    await waitForEngine(60000);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+});
+
+// Renderer API proxy — avoids CORS / Failed to fetch when sidecar is up
+ipcMain.handle("engine-fetch", async (_e, pathName, init = {}) => {
+  const method = (init.method || "GET").toUpperCase();
+  const token = ensureToken();
+  let bodyObj = undefined;
+  if (init.body != null && init.body !== "") {
+    try {
+      bodyObj = typeof init.body === "string" ? JSON.parse(init.body) : init.body;
+    } catch {
+      bodyObj = init.body;
+    }
+  }
+  try {
+    // Ensure engine is alive for mutating calls
+    if (!(await healthOk()) && (method === "POST" || method === "PATCH" || method === "DELETE")) {
+      if (!engineProc) startEngine();
+      await waitForEngine(30000);
+    }
+    const result = await httpJson(method, pathName, method === "GET" || method === "HEAD" ? undefined : bodyObj, token);
+    return result;
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      raw: "",
+      error: err && err.message ? err.message : String(err),
+    };
+  }
 });
 
 ipcMain.handle("path-to-file-url", async (_e, filePath) => {
   const abs = path.resolve(filePath);
-  // Prefer custom scheme for secure local playback
   const encoded = encodeURI(abs.replace(/\\/g, "/"));
   return `subparty://media/${encoded}`;
 });

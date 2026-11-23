@@ -67,7 +67,6 @@ function headers(json = true): HeadersInit {
   return h;
 }
 
-/** Turn FastAPI / fetch failures into short human text (never raw JSON blobs). */
 export function formatApiError(err: unknown): string {
   if (err instanceof ApiError) return err.message;
   if (err instanceof Error) return formatApiErrorText(err.message);
@@ -77,15 +76,18 @@ export function formatApiError(err: unknown): string {
 export function formatApiErrorText(raw: string): string {
   const text = (raw || "").trim();
   if (!text) return "Request failed.";
+  if (/failed to fetch/i.test(text) || /networkerror/i.test(text) || text === "timeout") {
+    return "Engine offline — click Retry engine, or restart with npm run dev.";
+  }
   try {
     const parsed = JSON.parse(text) as { detail?: unknown };
     if (typeof parsed.detail === "string") {
       const d = parsed.detail;
       if (d === "Not Found") {
-        return "Engine route not found — the sidecar looks outdated. Quit SubParty fully and run npm run dev again so engine 2.0 starts.";
+        return "Engine route missing — outdated sidecar. Retry engine / restart app.";
       }
       if (d === "Unauthorized") {
-        return "Engine rejected the request (auth). Restart the app so it reloads the engine token.";
+        return "Engine auth mismatch — Retry engine to refresh the token.";
       }
       if (d.toLowerCase().includes("video not found")) {
         return "Video file not found on disk. Pick the file again.";
@@ -109,29 +111,64 @@ export function formatApiErrorText(raw: string): string {
   return text;
 }
 
-async function raiseForStatus(res: Response): Promise<void> {
+async function viaIpc(
+  pathName: string,
+  method: string,
+  body?: unknown
+): Promise<{ ok: boolean; status: number; raw: string; error?: string }> {
+  if (!window.subparty?.engineFetch) {
+    throw new Error("no-ipc");
+  }
+  return window.subparty.engineFetch(pathName, {
+    method,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+async function raiseFromResult(res: { ok: boolean; status: number; raw: string; error?: string }) {
   if (res.ok) return;
-  const raw = await res.text();
-  throw new ApiError(res.status, raw, formatApiErrorText(raw || `HTTP ${res.status}`));
+  if (res.status === 0) {
+    throw new ApiError(0, res.error || "", formatApiErrorText(res.error || "Failed to fetch"));
+  }
+  throw new ApiError(res.status, res.raw, formatApiErrorText(res.raw || `HTTP ${res.status}`));
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
+  try {
+    const res = await viaIpc(path, "GET");
+    await raiseFromResult(res);
+    return JSON.parse(res.raw) as T;
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== "no-ipc") throw err;
+  }
   const res = await fetch(`${_base}${path}`, { headers: headers(false) });
-  await raiseForStatus(res);
+  if (!res.ok) {
+    const raw = await res.text();
+    throw new ApiError(res.status, raw, formatApiErrorText(raw || `HTTP ${res.status}`));
+  }
   return (await res.json()) as T;
 }
 
 export async function apiSend<T>(path: string, method: string, body?: unknown): Promise<T> {
+  try {
+    const res = await viaIpc(path, method, body);
+    await raiseFromResult(res);
+    return JSON.parse(res.raw || "null") as T;
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== "no-ipc") throw err;
+  }
   const res = await fetch(`${_base}${path}`, {
     method,
     headers: headers(true),
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  await raiseForStatus(res);
+  if (!res.ok) {
+    const raw = await res.text();
+    throw new ApiError(res.status, raw, formatApiErrorText(raw || `HTTP ${res.status}`));
+  }
   return (await res.json()) as T;
 }
 
-/** Best-effort call — ignores 404 (old engines) so Process can continue. */
 export async function apiSendOptional(path: string, method: string, body?: unknown): Promise<boolean> {
   try {
     await apiSend(path, method, body);
@@ -139,6 +176,29 @@ export async function apiSendOptional(path: string, method: string, body?: unkno
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) return false;
     throw err;
+  }
+}
+
+export async function pingHealth(): Promise<{
+  ok: boolean;
+  version: string | null;
+  error?: string;
+}> {
+  if (window.subparty?.engineHealth) {
+    const h = await window.subparty.engineHealth();
+    return { ok: !!h.ok, version: h.version || null, error: h.error };
+  }
+  try {
+    const res = await fetch(`${_base}/health`);
+    if (!res.ok) return { ok: false, version: null, error: `HTTP ${res.status}` };
+    const body = (await res.json()) as { version?: string };
+    return { ok: true, version: body.version || null };
+  } catch (err) {
+    return {
+      ok: false,
+      version: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 

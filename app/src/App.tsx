@@ -7,6 +7,7 @@ import {
   apiToken,
   eventsUrl,
   formatApiError,
+  pingHealth,
   setApiBase,
   setApiToken,
   type Cue,
@@ -102,38 +103,59 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     const ping = async () => {
-      try {
-        const res = await fetch(`${engineUrl}/health`);
-        if (!cancelled) setEngineOk(res.ok);
-        if (res.ok) {
-          try {
-            const body = (await res.json()) as { version?: string; mode?: string };
-            if (!cancelled) setEngineVersion(body.version || null);
-            const ver = String(body.version || "0");
-            if (ver.startsWith("0.") && !cancelled) {
-              setError(
-                `Engine ${ver} is outdated (need 2.0+). Quit SubParty completely and restart with npm run dev so the new sidecar binds port 18765.`
-              );
-            }
-          } catch {
-            /* ignore */
-          }
-          if (apiToken()) void refreshMeta();
+      const h = await pingHealth();
+      if (cancelled) return;
+      setEngineOk(h.ok);
+      setEngineVersion(h.version);
+      if (h.ok) {
+        if (h.version && h.version.startsWith("0.")) {
+          setError(
+            `Engine ${h.version} is outdated (need 2.0+). Click Retry engine or restart npm run dev.`
+          );
+        } else {
+          setError((prev) =>
+            prev && /engine offline|failed to fetch|outdated sidecar|retry engine/i.test(prev)
+              ? null
+              : prev
+          );
         }
-      } catch {
-        if (!cancelled) {
-          setEngineOk(false);
-          setEngineVersion(null);
-        }
+        if (apiToken()) void refreshMeta();
       }
     };
     void ping();
-    const id = window.setInterval(ping, 5000);
+    const id = window.setInterval(ping, 3000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
   }, [engineUrl]);
+
+  async function retryEngine() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (window.subparty?.engineRestart) {
+        const r = await window.subparty.engineRestart();
+        if (!r.ok) throw new Error(r.error || "Engine restart failed");
+      }
+      if (window.subparty?.engineToken) {
+        setApiToken(await window.subparty.engineToken());
+      }
+      const h = await pingHealth();
+      setEngineOk(h.ok);
+      setEngineVersion(h.version);
+      if (!h.ok) {
+        setError(formatApiError(new Error(h.error || "Failed to fetch")));
+      } else {
+        void refreshMeta();
+      }
+    } catch (err) {
+      setEngineOk(false);
+      setError(formatApiError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!jobId || (status !== "running" && status !== "paused")) return;
@@ -503,6 +525,15 @@ export function App() {
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void retryEngine()}
+            disabled={busy}
+            title="Restart Python engine sidecar"
+          >
+            Retry engine
+          </button>
           <button type="button" className="secondary" onClick={() => void pickVideo()}>
             Pick video
           </button>
@@ -596,24 +627,34 @@ export function App() {
 
           {panel === "job" ? (
             <>
-              <div className={`status-banner${error ? " error" : status === "running" ? " live" : ""}`}>
+              <div
+                className={`status-banner${
+                  error || engineOk === false ? " error" : status === "running" ? " live" : ""
+                }`}
+              >
                 <strong>
-                  {status === "idle" ? "Idle" : status}
-                  {cueCount ? ` · ${cueCount} cues` : ""}
-                  {status === "running" || status === "paused" ? ` · ${pct}%` : ""}
+                  {engineOk === false
+                    ? "Engine offline"
+                    : status === "idle"
+                      ? "Idle"
+                      : status}
+                  {engineOk && cueCount ? ` · ${cueCount} cues` : ""}
+                  {engineOk && (status === "running" || status === "paused") ? ` · ${pct}%` : ""}
                 </strong>
                 <span>
                   {error
                     ? error
-                    : status === "running"
-                      ? "Live OCR — provisional cues refine as context fills."
-                      : status === "paused"
-                        ? "Paused at playhead."
-                        : status === "done"
-                          ? "Done. Use Export for bilingual SRT / VTT / ASS."
-                          : status === "error"
-                            ? "Fix the issue above, then Process again."
-                            : "Pick a video, then Process."}
+                    : engineOk === false
+                      ? "Sidecar not reachable. Click Retry engine (or restart npm run dev)."
+                      : status === "running"
+                        ? "Live OCR — provisional cues refine as context fills."
+                        : status === "paused"
+                          ? "Paused at playhead."
+                          : status === "done"
+                            ? "Done. Use Export for bilingual SRT / VTT / ASS."
+                            : status === "error"
+                              ? "Fix the issue above, then Process again."
+                              : "Pick a video, then Process."}
                 </span>
               </div>
 
