@@ -399,6 +399,26 @@ button.danger:hover:not(:disabled) {
   color: rgba(232, 238, 245, 0.85);
 }
 
+.transport .volume-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: rgba(232, 238, 245, 0.9);
+  font-size: 0.78rem;
+}
+
+.transport .volume-control input[type="range"] {
+  width: 5.5rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.transport .volume-pct {
+  min-width: 2.4rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .transport .clock {
   margin-left: auto;
   font-variant-numeric: tabular-nums;

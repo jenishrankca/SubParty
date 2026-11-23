@@ -53,6 +53,7 @@ from models_mgr import ensure_model, list_models, setup_checklist
 from audio_verify import audio_verify_status
 from paths import app_data_dir
 from pipeline import jobs
+from playback_fix import ensure_playable_media, probe_media
 from region import (
     SubtitleRegion,
     clear_confirmed_region,
@@ -206,6 +207,11 @@ class RegionConfirmRequest(BaseModel):
 
 class RegionClearRequest(BaseModel):
     video_path: str | None = None
+
+
+class PlaybackPrepareRequest(BaseModel):
+    video_path: str = Field(..., min_length=1)
+    force: bool = False
 
 
 class RecoverRequest(BaseModel):
@@ -832,6 +838,23 @@ def region_confirm(body: RegionConfirmRequest) -> dict[str, Any]:
 def region_clear(body: RegionClearRequest) -> dict[str, Any]:
     clear_confirmed_region(body.video_path)
     return {"ok": True, "cleared": body.video_path or "all"}
+
+
+@app.get("/playback/probe")
+def playback_probe(video_path: str) -> dict[str, Any]:
+    if not Path(video_path).is_file():
+        raise HTTPException(status_code=404, detail="Video not found")
+    return {"ok": True, **probe_media(video_path)}
+
+
+@app.post("/playback/prepare")
+def playback_prepare(body: PlaybackPrepareRequest) -> dict[str, Any]:
+    if not Path(body.video_path).is_file():
+        raise HTTPException(status_code=404, detail="Video not found")
+    try:
+        return ensure_playable_media(body.video_path, force=body.force)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/recovery")

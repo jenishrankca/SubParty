@@ -241,6 +241,9 @@ export function App() {
   const [audioSummary, setAudioSummary] = useState<AudioSummary | null>(null);
   const [subtitleGate, setSubtitleGate] = useState<SubtitleGate>("idle");
   const [bufferOrigin, setBufferOrigin] = useState(0);
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+  const [audioInfo, setAudioInfo] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const jobIdRef = useRef<string | null>(null);
@@ -260,6 +263,44 @@ export function App() {
   useEffect(() => {
     bufferOriginRef.current = bufferOrigin;
   }, [bufferOrigin]);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.volume = Math.max(0, Math.min(1, volume));
+    v.muted = muted;
+  }, [volume, muted, videoUrl]);
+
+  async function loadPlayableVideo(filePath: string): Promise<void> {
+    setAudioInfo(null);
+    if (window.subparty.prepareVideo) {
+      setBatchNote("Preparing player audio…");
+      const prep = await window.subparty.prepareVideo(filePath);
+      setVideoUrl(prep.url);
+      const a0 = prep.audio && prep.audio[0];
+      const codec = a0?.codec_name || "?";
+      const ch = a0?.channels ? `${a0.channels}ch` : "";
+      const sr = a0?.sample_rate ? `${a0.sample_rate}Hz` : "";
+      const bits = [codec, ch, sr].filter(Boolean).join(" · ");
+      if (prep.remuxed) {
+        setAudioInfo(
+          `${bits}${prep.cached ? " · cached fix" : " · remuxed for Chromium"}`
+        );
+        setBatchNote(
+          prep.reason === "mp4-aac-edit-list"
+            ? "Fixed silent AAC (MP4 edit list) for player — OCR still uses the original file."
+            : `Player media remuxed (${prep.reason || "compat"}) — OCR still uses the original file.`
+        );
+      } else {
+        setAudioInfo(bits || null);
+        setBatchNote(null);
+      }
+      if (prep.error) setError(`Player prepare: ${prep.error}`);
+      return;
+    }
+    const url = await window.subparty.pathToFileUrl(filePath);
+    setVideoUrl(url);
+  }
 
   useEffect(() => {
     void (async () => {
@@ -653,8 +694,7 @@ export function App() {
     const picked = await window.subparty.pickVideo();
     if (!picked) return;
     setVideoPath(picked);
-    const url = await window.subparty.pathToFileUrl(picked);
-    setVideoUrl(url);
+    await loadPlayableVideo(picked);
     resetJobState();
     await loadGlossary(picked);
   }
@@ -677,8 +717,7 @@ export function App() {
       const first = res.jobs.find((j) => j.id);
       if (first?.id) {
         setVideoPath(paths[0]);
-        const url = await window.subparty.pathToFileUrl(paths[0]);
-        setVideoUrl(url);
+        await loadPlayableVideo(paths[0]);
         setJobId(first.id);
         setStatus("running");
         subscribe(first.id);
@@ -1050,8 +1089,7 @@ export function App() {
         engine_id: engineId,
       });
       setVideoPath(job.video_path);
-      const url = await window.subparty.pathToFileUrl(job.video_path);
-      setVideoUrl(url);
+      await loadPlayableVideo(job.video_path);
       setJobId(job.id);
       setSrtPath(job.srt_path);
       setStatus(job.status);
@@ -1301,6 +1339,10 @@ export function App() {
                 ref={videoRef}
                 src={videoUrl}
                 onTimeUpdate={(e) => setPlayTime(e.currentTarget.currentTime)}
+                onVolumeChange={(e) => {
+                  setVolume(e.currentTarget.volume);
+                  setMuted(e.currentTarget.muted);
+                }}
                 onPlay={(e) => {
                   if (subtitleGateRef.current === "preparing") {
                     e.currentTarget.pause();
@@ -1310,7 +1352,11 @@ export function App() {
                   setPlaying(true);
                 }}
                 onPause={() => setPlaying(false)}
-                onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+                onLoadedMetadata={(e) => {
+                  setDuration(e.currentTarget.duration || 0);
+                  e.currentTarget.volume = volume;
+                  e.currentTarget.muted = muted;
+                }}
               />
               {subtitleGate === "preparing" || (subtitleGate === "ready" && !playing) ? (
                 <div
@@ -1369,10 +1415,35 @@ export function App() {
                 <button type="button" className="secondary" onClick={() => seekBy(10)}>
                   +10s
                 </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setMuted((m) => !m)}
+                  title={muted ? "Unmute" : "Mute"}
+                  aria-pressed={muted}
+                >
+                  {muted || volume === 0 ? "Unmute" : "Mute"}
+                </button>
+                <label className="volume-control" title="Volume">
+                  <span className="volume-pct">{Math.round((muted ? 0 : volume) * 100)}%</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round((muted ? 0 : volume) * 100)}
+                    onChange={(e) => {
+                      const next = Number(e.target.value) / 100;
+                      setVolume(next);
+                      if (next > 0 && muted) setMuted(false);
+                      if (next === 0) setMuted(true);
+                    }}
+                  />
+                </label>
                 <span className="clock">
                   {formatTime(playTime)}
                   {duration > 0 ? ` / ${formatTime(duration)}` : ""}
                 </span>
+                {audioInfo ? <span className="gate-hint" title={audioInfo}>{audioInfo}</span> : null}
                 {subtitleGate === "preparing" ? (
                   <span className="gate-hint">Preparing subtitles…</span>
                 ) : subtitleGate === "ready" && !playing ? (

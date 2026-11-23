@@ -1,13 +1,24 @@
-const { app, BrowserWindow, dialog, ipcMain, shell, protocol, net } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell, protocol } = require("electron");
 const path = require("path");
 const { spawn, exec, execFile } = require("child_process");
 const http = require("http");
 const fs = require("fs");
-const { pathToFileURL } = require("url");
+const { Readable } = require("stream");
 const crypto = require("crypto");
 const { promisify } = require("util");
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+const UNSUPPORTED_AUDIO = new Set([
+  "ac3",
+  "eac3",
+  "truehd",
+  "dts",
+  "dca",
+  "mlp",
+  "pcm_bluray",
+]);
 
 const ENGINE_PORT = 18765;
 const ENGINE_URL = `http://127.0.0.1:${ENGINE_PORT}`;
@@ -311,24 +322,174 @@ function createWindow() {
   }
 }
 
+function mimeForMedia(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".mp4" || ext === ".m4v") return "video/mp4";
+  if (ext === ".webm") return "video/webm";
+  if (ext === ".mkv") return "video/x-matroska";
+  if (ext === ".mov") return "video/quicktime";
+  if (ext === ".ts" || ext === ".m2ts") return "video/mp2t";
+  if (ext === ".avi") return "video/x-msvideo";
+  if (ext === ".m4a") return "audio/mp4";
+  if (ext === ".mp3") return "audio/mpeg";
+  return "application/octet-stream";
+}
+
+function resolveMediaPath(requestUrl) {
+  const u = new URL(requestUrl);
+  let filePath = decodeURIComponent(u.pathname || "");
+  if (process.platform === "win32" && filePath.startsWith("/")) {
+    filePath = filePath.slice(1);
+  }
+  return path.normalize(filePath);
+}
+
 function registerMediaProtocol() {
-  protocol.handle("subparty", (request) => {
+  // Explicit Range + Content-Type so Chromium can seek and decode audio on large MP4s.
+  // (net.fetch(file://) alone was flaky for some AAC edit-list / large-file cases.)
+  protocol.handle("subparty", async (request) => {
     try {
-      const u = new URL(request.url);
-      let filePath = decodeURIComponent(u.pathname || "");
-      if (process.platform === "win32" && filePath.startsWith("/")) {
-        filePath = filePath.slice(1);
-      }
-      filePath = path.normalize(filePath);
+      const filePath = resolveMediaPath(request.url);
       if (!fs.existsSync(filePath)) {
         return new Response("Not found", { status: 404 });
       }
-      return net.fetch(pathToFileURL(filePath).toString());
+      const stat = fs.statSync(filePath);
+      const fileSize = stat.size;
+      const mime = mimeForMedia(filePath);
+      const rangeHeader = request.headers.get("Range") || request.headers.get("range");
+
+      if (rangeHeader) {
+        const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
+        if (!m) {
+          return new Response("Invalid Range", { status: 416 });
+        }
+        let start = m[1] ? parseInt(m[1], 10) : 0;
+        let end = m[2] ? parseInt(m[2], 10) : fileSize - 1;
+        if (Number.isNaN(start) || Number.isNaN(end) || start < 0 || end >= fileSize || start > end) {
+          return new Response("Range Not Satisfiable", {
+            status: 416,
+            headers: { "Content-Range": `bytes */${fileSize}` },
+          });
+        }
+        const chunkSize = end - start + 1;
+        const nodeStream = fs.createReadStream(filePath, { start, end });
+        return new Response(Readable.toWeb(nodeStream), {
+          status: 206,
+          headers: {
+            "Content-Type": mime,
+            "Content-Length": String(chunkSize),
+            "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache",
+          },
+        });
+      }
+
+      const nodeStream = fs.createReadStream(filePath);
+      return new Response(Readable.toWeb(nodeStream), {
+        status: 200,
+        headers: {
+          "Content-Type": mime,
+          "Content-Length": String(fileSize),
+          "Accept-Ranges": "bytes",
+          "Cache-Control": "no-cache",
+        },
+      });
     } catch (err) {
       console.error("[subparty protocol]", err);
       return new Response("Bad request", { status: 400 });
     }
   });
+}
+
+function ffmpegBin() {
+  const bundled = path.join(projectRoot(), "bin", "ffmpeg.exe");
+  if (fs.existsSync(bundled)) return bundled;
+  return process.env.SUBPARTY_FFMPEG || "ffmpeg";
+}
+
+function ffprobeBin() {
+  const bundled = path.join(projectRoot(), "bin", "ffprobe.exe");
+  if (fs.existsSync(bundled)) return bundled;
+  return process.env.SUBPARTY_FFPROBE || "ffprobe";
+}
+
+function playbackCacheDir() {
+  const d = path.join(projectRoot(), "data", "playback");
+  fs.mkdirSync(d, { recursive: true });
+  return d;
+}
+
+async function diagnosePlayback(filePath) {
+  const { stdout, stderr } = await execFileAsync(
+    ffprobeBin(),
+    [
+      "-hide_banner",
+      "-show_entries",
+      "stream=index,codec_type,codec_name,channels,sample_rate,bit_rate",
+      "-of",
+      "json",
+      filePath,
+    ],
+    { encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+  );
+  let data = {};
+  try {
+    data = JSON.parse(stdout || "{}");
+  } catch {
+    data = {};
+  }
+  const streams = Array.isArray(data.streams) ? data.streams : [];
+  const audio = streams.filter((s) => s.codec_type === "audio");
+  const editListBroken = /edit list/i.test(stderr || "");
+  const bad = audio
+    .map((a) => String(a.codec_name || "").toLowerCase())
+    .filter((c) => UNSUPPORTED_AUDIO.has(c));
+  const needsRemux = editListBroken || bad.length > 0;
+  let reason = null;
+  if (editListBroken) reason = "mp4-aac-edit-list";
+  else if (bad.length) reason = `unsupported-audio:${bad.join(",")}`;
+  return {
+    audio,
+    editListBroken,
+    unsupportedAudio: bad,
+    needsRemux,
+    reencodeAudio: bad.length > 0,
+    reason,
+  };
+}
+
+async function ensurePlayableMedia(filePath) {
+  const abs = path.resolve(filePath);
+  const diag = await diagnosePlayback(abs);
+  if (!diag.needsRemux) {
+    return { playPath: abs, remuxed: false, cached: false, ...diag };
+  }
+  const st = fs.statSync(abs);
+  const key = crypto
+    .createHash("sha1")
+    .update(`${abs}|${st.size}|${Math.floor(st.mtimeMs)}`)
+    .digest("hex")
+    .slice(0, 16);
+  const out = path.join(playbackCacheDir(), `${key}.mp4`);
+  if (fs.existsSync(out) && fs.statSync(out).size > 1000) {
+    return { playPath: out, remuxed: true, cached: true, ...diag };
+  }
+  const args = diag.reencodeAudio
+    ? ["-y", "-hide_banner", "-loglevel", "error", "-i", abs, "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out]
+    : ["-y", "-hide_banner", "-loglevel", "error", "-i", abs, "-c", "copy", "-movflags", "+faststart", out];
+  console.log(`[playback] fixing ${path.basename(abs)} → ${path.basename(out)} (${diag.reason})`);
+  await execFileAsync(ffmpegBin(), args, {
+    windowsHide: true,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return { playPath: out, remuxed: true, cached: false, ...diag };
+}
+
+function toSubpartyUrl(filePath) {
+  const abs = path.resolve(filePath);
+  const encoded = encodeURI(abs.replace(/\\/g, "/"));
+  return `subparty://media/${encoded}`;
 }
 
 app.whenReady().then(async () => {
@@ -463,7 +624,33 @@ ipcMain.handle("engine-fetch", async (_e, pathName, init = {}) => {
 });
 
 ipcMain.handle("path-to-file-url", async (_e, filePath) => {
-  const abs = path.resolve(filePath);
-  const encoded = encodeURI(abs.replace(/\\/g, "/"));
-  return `subparty://media/${encoded}`;
+  return toSubpartyUrl(filePath);
+});
+
+ipcMain.handle("prepare-video", async (_e, filePath) => {
+  try {
+    const prepared = await ensurePlayableMedia(filePath);
+    return {
+      ok: true,
+      url: toSubpartyUrl(prepared.playPath),
+      source_path: path.resolve(filePath),
+      play_path: prepared.playPath,
+      remuxed: Boolean(prepared.remuxed),
+      cached: Boolean(prepared.cached),
+      reason: prepared.reason || null,
+      audio: prepared.audio || [],
+      edit_list_broken: Boolean(prepared.editListBroken),
+    };
+  } catch (err) {
+    // Fall back to original so video still opens; sound may be missing
+    console.error("[playback] prepare failed", err);
+    return {
+      ok: false,
+      url: toSubpartyUrl(filePath),
+      source_path: path.resolve(filePath),
+      play_path: path.resolve(filePath),
+      remuxed: false,
+      error: err && err.message ? err.message : String(err),
+    };
+  }
 });

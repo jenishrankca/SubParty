@@ -11,4 +11,5 @@ contextBridge.exposeInMainWorld("subparty", {
   engineRestart: () => ipcRenderer.invoke("engine-restart"),
   engineFetch: (pathName, init) => ipcRenderer.invoke("engine-fetch", pathName, init),
   pathToFileUrl: (filePath) => ipcRenderer.invoke("path-to-file-url", filePath),
+  prepareVideo: (filePath) => ipcRenderer.invoke("prepare-video", filePath),
 });

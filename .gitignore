@@ -30,6 +30,7 @@ data/models/
 data/batches/
 data/characters/
 data/reports/
+data/playback/
 # Keep directory placeholders if committed
 !data/.gitkeep
 !data/models/.gitkeep

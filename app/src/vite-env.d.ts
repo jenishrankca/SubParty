@@ -26,6 +26,18 @@ interface SubPartyApi {
   engineRestart: () => Promise<{ ok: boolean; error?: string }>;
   engineFetch: (pathName: string, init?: { method?: string; body?: string }) => Promise<EngineFetchResult>;
   pathToFileUrl: (filePath: string) => Promise<string>;
+  prepareVideo: (filePath: string) => Promise<{
+    ok: boolean;
+    url: string;
+    source_path: string;
+    play_path: string;
+    remuxed?: boolean;
+    cached?: boolean;
+    reason?: string | null;
+    audio?: Array<{ codec_name?: string; channels?: number; sample_rate?: string | number }>;
+    edit_list_broken?: boolean;
+    error?: string;
+  }>;
 }
 
 interface Window {
