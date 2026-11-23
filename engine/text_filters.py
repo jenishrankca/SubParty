@@ -50,6 +50,10 @@ _QUALITY_DIGIT_RE = re.compile(
 _MOSTLY_LATIN_DIGITS = re.compile(r"^[\sA-Za-z0-9\-_.|/·•:：]+$")
 
 
+# Lines / cues below this OCR score are flagged uncertain for review
+UNCERTAIN_CONFIDENCE = 0.78
+
+
 @dataclass
 class OcrLine:
     text: str
@@ -58,6 +62,17 @@ class OcrLine:
     cy: float = 0.5
     w: float = 0.0
     h: float = 0.0
+    confidence: float = 1.0
+
+
+@dataclass
+class FilteredOcr:
+    text: str
+    confidence: float = 1.0
+
+    @property
+    def uncertain(self) -> bool:
+        return bool(self.text) and self.confidence < UNCERTAIN_CONFIDENCE
 
 
 def is_junk_line(text: str) -> bool:
@@ -137,9 +152,9 @@ def is_dialogue_position(
     return overlaps_center
 
 
-def filter_ocr_lines(lines: list[OcrLine]) -> str:
-    """Return kept dialogue text (newline-joined), or empty if nothing usable."""
-    kept: list[str] = []
+def filter_ocr_result(lines: list[OcrLine]) -> FilteredOcr:
+    """Return kept dialogue text + min confidence, or empty if nothing usable."""
+    kept: list[OcrLine] = []
     for line in lines:
         text = re.sub(r"\s+", " ", (line.text or "").strip())
         if not text:
@@ -148,13 +163,33 @@ def filter_ocr_lines(lines: list[OcrLine]) -> str:
             continue
         if not is_dialogue_position(line):
             continue
-        kept.append(text)
-    # De-dupe consecutive identical
-    out: list[str] = []
-    for t in kept:
-        if not out or out[-1] != t:
-            out.append(t)
-    return "\n".join(out)
+        kept.append(
+            OcrLine(
+                text=text,
+                cx=line.cx,
+                cy=line.cy,
+                w=line.w,
+                h=line.h,
+                confidence=float(line.confidence or 0.0),
+            )
+        )
+    # De-dupe consecutive identical text (keep higher confidence)
+    out: list[OcrLine] = []
+    for ln in kept:
+        if out and out[-1].text == ln.text:
+            if ln.confidence > out[-1].confidence:
+                out[-1] = ln
+            continue
+        out.append(ln)
+    if not out:
+        return FilteredOcr(text="", confidence=0.0)
+    conf = min(ln.confidence for ln in out)
+    return FilteredOcr(text="\n".join(ln.text for ln in out), confidence=conf)
+
+
+def filter_ocr_lines(lines: list[OcrLine]) -> str:
+    """Return kept dialogue text (newline-joined), or empty if nothing usable."""
+    return filter_ocr_result(lines).text
 
 
 def normalize_ocr_text(text: str) -> str:

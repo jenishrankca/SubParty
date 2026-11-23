@@ -157,6 +157,11 @@ button.secondary {
   font-size: 1em;
 }
 
+.cue-overlay.uncertain {
+  outline: 1px solid rgba(232, 168, 74, 0.85);
+  box-shadow: 0 0 0 1px rgba(232, 168, 74, 0.25);
+}
+
 .transport {
   position: absolute;
   left: 0;
@@ -271,6 +276,34 @@ button.secondary {
   font-size: 0.8rem;
   color: var(--muted);
   margin-top: 0.2rem;
+}
+
+.cue-list.review {
+  margin-bottom: 1rem;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.cue-list li.uncertain-item {
+  border-color: rgba(232, 168, 74, 0.55);
+  background: rgba(60, 42, 18, 0.45);
+}
+
+.side h2 .linkish,
+button.linkish {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.1rem 0.35rem;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.cue-list .t .linkish {
+  margin-left: 0.45rem;
 }
 
 .empty {

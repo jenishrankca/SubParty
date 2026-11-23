@@ -46,6 +46,7 @@ def ocr_lines(path: str) -> list[OcrLine]:
 
     txts = getattr(out, "txts", None)
     boxes = getattr(out, "boxes", None)
+    scores = getattr(out, "scores", None)
     if txts is not None:
         lines: list[OcrLine] = []
         for i, t in enumerate(txts):
@@ -53,7 +54,8 @@ def ocr_lines(path: str) -> list[OcrLine]:
             if not text:
                 continue
             box = boxes[i] if boxes is not None and i < len(boxes) else None
-            lines.append(_line_from_box(text, box, iw, ih))
+            score = _score_at(scores, i)
+            lines.append(_line_from_box(text, box, iw, ih, score))
         return lines
 
     payload = out[0] if isinstance(out, tuple) and out else out
@@ -66,13 +68,25 @@ def ocr_lines(path: str) -> list[OcrLine]:
             if not text:
                 continue
             box = row[0] if isinstance(row[0], (list, tuple)) else None
-            lines.append(_line_from_box(text, box, iw, ih))
+            score = float(row[2]) if len(row) > 2 and row[2] is not None else 1.0
+            lines.append(_line_from_box(text, box, iw, ih, score))
         return lines
     return []
 
 
 def ocr_image(path: str) -> str:
     return "\n".join(ln.text for ln in ocr_lines(path)).strip()
+
+
+def _score_at(scores: Any, index: int) -> float:
+    if scores is None:
+        return 1.0
+    try:
+        if index < len(scores):
+            return float(scores[index])
+    except Exception:
+        pass
+    return 1.0
 
 
 def _image_size(img: Any, path: str) -> tuple[int, int]:
@@ -91,9 +105,10 @@ def _image_size(img: Any, path: str) -> tuple[int, int]:
         return 1, 1
 
 
-def _line_from_box(text: str, box: Any, iw: int, ih: int) -> OcrLine:
+def _line_from_box(text: str, box: Any, iw: int, ih: int, confidence: float = 1.0) -> OcrLine:
+    conf = max(0.0, min(1.0, float(confidence if confidence is not None else 1.0)))
     if box is None or iw <= 0 or ih <= 0:
-        return OcrLine(text=text)
+        return OcrLine(text=text, confidence=conf)
     try:
         xs = [float(p[0]) for p in box]
         ys = [float(p[1]) for p in box]
@@ -103,6 +118,6 @@ def _line_from_box(text: str, box: Any, iw: int, ih: int) -> OcrLine:
         cy = ((min_y + max_y) / 2) / float(ih)
         w = max(0.0, (max_x - min_x) / float(iw))
         h = max(0.0, (max_y - min_y) / float(ih))
-        return OcrLine(text=text, cx=cx, cy=cy, w=w, h=h)
+        return OcrLine(text=text, cx=cx, cy=cy, w=w, h=h, confidence=conf)
     except Exception:
-        return OcrLine(text=text)
+        return OcrLine(text=text, confidence=conf)

@@ -6,6 +6,8 @@ interface Cue {
   end: number;
   text_zh: string;
   text_en: string;
+  confidence?: number;
+  uncertain?: boolean;
 }
 
 type JobStatus = "idle" | "queued" | "running" | "done" | "error" | "cancelled";
@@ -41,6 +43,7 @@ export function App() {
   const [seriesId, setSeriesId] = useState<string | null>(null);
   const [regionLabel, setRegionLabel] = useState<string | null>(null);
   const [glossaryCount, setGlossaryCount] = useState<number | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(true);
   const videoRef = useRef<HTMLVideoElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const jobIdRef = useRef<string | null>(null);
@@ -112,6 +115,11 @@ export function App() {
     }
     return best;
   }, [cues, playTime]);
+
+  const uncertainCues = useMemo(
+    () => cues.filter((c) => c.uncertain || (typeof c.confidence === "number" && c.confidence < 0.78)),
+    [cues]
+  );
 
   async function pickVideo() {
     setError(null);
@@ -201,9 +209,14 @@ export function App() {
         if (type === "cue" && data.cue) {
           const cue = data.cue as Cue;
           setCues((prev) => {
-            const next = prev.filter(
-              (c) => !(Math.abs(c.start - cue.start) < 0.05 && c.text_en === cue.text_en)
-            );
+            const next = prev.filter((c) => {
+              const sameStart = Math.abs(c.start - cue.start) < 0.12;
+              const overlaps =
+                Math.min(c.end, cue.end) - Math.max(c.start, cue.start) > 0.05;
+              const sameZhNear =
+                c.text_zh === cue.text_zh && Math.abs(c.start - cue.start) < 0.6;
+              return !(sameStart || overlaps || sameZhNear);
+            });
             next.push(cue);
             next.sort((a, b) => a.start - b.start);
             return next;
@@ -329,7 +342,11 @@ export function App() {
                 onPause={() => setPlaying(false)}
                 onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
               />
-              <div className={`cue-overlay${activeCue ? " visible" : ""}${bilingual ? " bilingual" : ""}`}>
+              <div
+                className={`cue-overlay${activeCue ? " visible" : ""}${bilingual ? " bilingual" : ""}${
+                  activeCue?.uncertain ? " uncertain" : ""
+                }`}
+              >
                 {bilingual && activeCue?.text_zh ? (
                   <div className="cue-zh">{activeCue.text_zh}</div>
                 ) : null}
@@ -432,6 +449,50 @@ export function App() {
                   : "Free local stack: ffmpeg → RapidOCR (zh) → Argos ZH→EN."}
           </div>
 
+          <h2>
+            Uncertain
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => setReviewOpen((v) => !v)}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              {uncertainCues.length} · {reviewOpen ? "hide" : "show"}
+            </button>
+          </h2>
+          {reviewOpen ? (
+            uncertainCues.length === 0 ? (
+              <div className="empty" style={{ padding: "0.35rem 0" }}>
+                No low-confidence cues.
+              </div>
+            ) : (
+              <ul className="cue-list review">
+                {uncertainCues.slice(0, 30).map((c) => (
+                  <li key={`u-${c.start}-${c.index}`} className="uncertain-item">
+                    <div className="t">
+                      #{c.index} · {formatTime(c.start)}–{formatTime(c.end)} ·{" "}
+                      {typeof c.confidence === "number" ? `${Math.round(c.confidence * 100)}%` : "?"}
+                      <button
+                        type="button"
+                        className="linkish"
+                        onClick={() => {
+                          const v = videoRef.current;
+                          if (!v) return;
+                          v.currentTime = Math.max(0, c.start);
+                          setPlayTime(c.start);
+                        }}
+                      >
+                        Jump
+                      </button>
+                    </div>
+                    <div className="en">{c.text_en}</div>
+                    <div className="zh">{c.text_zh}</div>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : null}
+
           <h2>Cues</h2>
           {cues.length === 0 ? (
             <div className="empty" style={{ padding: "0.5rem 0" }}>
@@ -440,9 +501,11 @@ export function App() {
           ) : (
             <ul className="cue-list">
               {[...cues].reverse().slice(0, 40).map((c) => (
-                <li key={`${c.start}-${c.index}`}>
+                <li key={`${c.start}-${c.index}`} className={c.uncertain ? "uncertain-item" : undefined}>
                   <div className="t">
                     #{c.index} · {formatTime(c.start)}–{formatTime(c.end)}
+                    {typeof c.confidence === "number" ? ` · ${Math.round(c.confidence * 100)}%` : ""}
+                    {c.uncertain ? " · review" : ""}
                   </div>
                   <div className="en">{c.text_en}</div>
                   <div className="zh">{c.text_zh}</div>

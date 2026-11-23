@@ -21,7 +21,7 @@ from pipeline import jobs
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("subparty.api")
 
-app = FastAPI(title="SubParty Engine", version="0.3.0")
+app = FastAPI(title="SubParty Engine", version="0.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -86,8 +86,8 @@ def health() -> dict[str, Any]:
         "ffmpeg": ffmpeg_ok,
         "ffprobe": ffprobe_ok,
         "error": ffmpeg_err,
-        "version": "0.3.0",
-        "mode": "playhead-priority+context+region+glossary",
+        "version": "0.4.0",
+        "mode": "playhead-priority+context+region+glossary+confidence",
     }
 
 

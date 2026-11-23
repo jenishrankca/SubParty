@@ -17,7 +17,7 @@ from glossary import glossary_for_video
 from ocr import ocr_lines, warm_ocr
 from region import SubtitleRegion, default_bottom_region, detect_subtitle_region
 from srt_writer import Cue, SrtWriter, merge_cue_payloads
-from text_filters import filter_ocr_lines
+from text_filters import UNCERTAIN_CONFIDENCE, filter_ocr_result
 from translate import warm_translate
 
 logger = logging.getLogger("subparty.pipeline")
@@ -185,6 +185,7 @@ class JobManager:
             n_ticks = max(1, int(duration / base_tick) + 1)
             done: set[int] = set()
             slot_text: dict[int, str] = {}
+            slot_conf: dict[int, float] = {}
             emitted_runs: set[tuple[int, int, str]] = set()
             cue_serial = 0
             timings: list[float] = []
@@ -295,10 +296,13 @@ class JobManager:
                             width=frame_w,
                             scale_width=640,
                         )
-                        zh = filter_ocr_lines(ocr_lines(str(frame_path)))
+                        filtered = filter_ocr_result(ocr_lines(str(frame_path)))
+                        zh = filtered.text
+                        conf = filtered.confidence
                     except Exception as exc:
                         logger.warning("frame @%.2fs failed: %s", t, exc)
                         zh = ""
+                        conf = 0.0
                     elapsed = time.perf_counter() - t0
                     timings.append(elapsed)
                     if len(timings) > 30:
@@ -306,6 +310,7 @@ class JobManager:
 
                     done.add(tick)
                     slot_text[tick] = zh
+                    slot_conf[tick] = conf if zh else 0.0
                     # When lagging hard, skip unfinished ticks behind playhead
                     if lag_ema > 1.8 or in_seek:
                         ph_tick = max(0, int(playhead / base_tick))
@@ -314,6 +319,7 @@ class JobManager:
                             if s not in done:
                                 done.add(s)
                                 slot_text.setdefault(s, "")
+                                slot_conf.setdefault(s, 0.0)
 
                     if zh:
                         blank_streak = 0
@@ -328,6 +334,7 @@ class JobManager:
                             if s not in done:
                                 done.add(s)
                                 slot_text[s] = zh
+                                slot_conf[s] = conf
                     last_zh = zh
 
                     job.current_time = t
@@ -338,6 +345,7 @@ class JobManager:
                         job,
                         writer,
                         slot_text,
+                        slot_conf,
                         done,
                         base_tick,
                         duration,
@@ -411,6 +419,7 @@ class JobManager:
         job: JobState,
         writer: SrtWriter,
         slot_text: dict[int, str],
+        slot_conf: dict[int, float],
         done: set[int],
         interval: float,
         duration: float,
@@ -440,8 +449,20 @@ class JobManager:
             if key not in emitted_runs:
                 start = s0 * interval
                 end = min(duration, (s1 + 1) * interval)
+                confs = [slot_conf.get(s, 1.0) for s in range(s0, s1 + 1) if slot_text.get(s) == zh]
+                confidence = min(confs) if confs else 1.0
                 upcoming = _upcoming_zh(slot_text, done, s1, limit=2)
-                serial = self._flush_cue(job, writer, serial, start, end, zh, dial_ctx, upcoming)
+                serial = self._flush_cue(
+                    job,
+                    writer,
+                    serial,
+                    start,
+                    end,
+                    zh,
+                    dial_ctx,
+                    upcoming,
+                    confidence=confidence,
+                )
                 emitted_runs.add(key)
             i = j
         return serial
@@ -456,6 +477,7 @@ class JobManager:
         zh: str,
         dial_ctx: DialogueContext,
         upcoming: list[str] | None = None,
+        confidence: float = 1.0,
     ) -> int:
         serial += 1
         try:
@@ -464,7 +486,17 @@ class JobManager:
             logger.warning("translate failed, keeping ZH: %s", exc)
             en = zh
 
-        cue = Cue(index=serial, start=start, end=end, text_zh=zh, text_en=en)
+        conf = max(0.0, min(1.0, float(confidence)))
+        uncertain = conf < UNCERTAIN_CONFIDENCE
+        cue = Cue(
+            index=serial,
+            start=start,
+            end=end,
+            text_zh=zh,
+            text_en=en,
+            confidence=conf,
+            uncertain=uncertain,
+        )
         stored = writer.upsert_and_rewrite(cue)
         payload = {
             "index": stored.index,
@@ -472,8 +504,8 @@ class JobManager:
             "end": stored.end,
             "text_zh": stored.text_zh,
             "text_en": stored.text_en,
-            "confidence": float(getattr(stored, "confidence", 1.0) or 1.0),
-            "uncertain": bool(getattr(stored, "uncertain", False)),
+            "confidence": float(stored.confidence),
+            "uncertain": bool(stored.uncertain),
         }
         job.cues = merge_cue_payloads(job.cues, payload)
         job.cue_count = len(job.cues)
