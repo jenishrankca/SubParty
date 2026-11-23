@@ -265,29 +265,44 @@ def reconcile_zh(
     return ocr, "keep-ocr"
 
 
-@lru_cache(maxsize=1)
-def _whisper_model(size: str = WHISPER_SIZE):
+@lru_cache(maxsize=4)
+def _whisper_model(size: str = WHISPER_SIZE, device_key: str = "auto"):
     from faster_whisper import WhisperModel
 
+    force = (os.environ.get("SUBPARTY_WHISPER_DEVICE") or device_key or "auto").strip().lower()
     device = "cpu"
     compute = "int8"
-    try:
-        import ctranslate2
+    if force in {"cuda", "gpu"}:
+        device, compute = "cuda", "float16"
+    elif force == "cpu":
+        device, compute = "cpu", "int8"
+    else:
+        try:
+            import ctranslate2
 
-        if ctranslate2.get_cuda_device_count() > 0:
-            device = "cuda"
-            compute = "float16"
-    except Exception:
-        pass
-    # Local cache dir under data/models
+            if ctranslate2.get_cuda_device_count() > 0:
+                device, compute = "cuda", "float16"
+        except Exception:
+            pass
     download_root = str(whisper_model_dir().parent)
     logger.info("loading faster-whisper size=%s device=%s compute=%s", size, device, compute)
-    return WhisperModel(
-        size,
-        device=device,
-        compute_type=compute,
-        download_root=download_root,
-    )
+    try:
+        return WhisperModel(
+            size,
+            device=device,
+            compute_type=compute,
+            download_root=download_root,
+        )
+    except Exception as exc:
+        if device != "cpu":
+            logger.warning("Whisper %s load failed (%s); falling back to CPU int8", device, exc)
+            return WhisperModel(
+                size,
+                device="cpu",
+                compute_type="int8",
+                download_root=download_root,
+            )
+        raise
 
 
 def ensure_whisper_model(size: str = WHISPER_SIZE) -> dict[str, Any]:
@@ -315,9 +330,18 @@ def transcribe_zh(
     language: str = "zh",
     word_timestamps: bool = True,
 ) -> list[AudioSegment]:
+    """
+    Transcribe Chinese audio from a PCM WAV path.
+
+    Loads samples via ``asr_io.load_wav_mono_f32`` so we never hit
+    faster-whisper's ``av.open(..., metadata_errors=...)`` (broken on PyAV 19).
+    """
+    from asr_io import load_wav_mono_f32
+
     model = _whisper_model(model_size)
+    audio, _sr = load_wav_mono_f32(wav_path)
     segments, _info = model.transcribe(
-        str(wav_path),
+        audio,
         language=language,
         beam_size=3,
         vad_filter=True,

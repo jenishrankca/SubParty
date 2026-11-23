@@ -3,5 +3,13 @@
 #
 # Uses CTranslate2. Prefers CUDA when available; otherwise CPU int8.
 # Default model size: small (~500 MB) — fits RTX 6GB / 16GB RAM.
+#
+# Note: faster-whisper's decode_audio() passes metadata_errors to av.open,
+# which breaks on PyAV 19. SubParty loads FFmpeg-extracted WAV via asr_io
+# (numpy) and never calls that path for ASR.
 faster-whisper>=1.0.0
-av>=12.0.0
+# Optional compare (Apache-2.0) — prefer a *separate* venv (pins transformers):
+#   pip install -U qwen-asr
+# Optional FunASR:
+#   pip install funasr modelscope
+# Align experiments (not Live path): Qwen3-ForcedAligner via qwen-asr + SUBPARTY_FORCED_ALIGNER=1

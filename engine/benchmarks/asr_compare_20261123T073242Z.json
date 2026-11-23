@@ -1,0 +1,210 @@
+{
+  "ok": true,
+  "stage": "4-asr-align",
+  "created_utc": "20261123T073242Z",
+  "summary": {
+    "before": {
+      "harness": "faster-whisper decode_audio → av.open(metadata_errors=...)",
+      "result": "TypeError on PyAV 19 — ASR skipped in stage-1 baseline",
+      "baseline_asr_status": "skipped"
+    },
+    "after": {
+      "harness": "FFmpeg WAV extract → asr_io.load_wav_mono_f32 → ndarray to WhisperModel",
+      "faster_whisper_ok": true,
+      "faster_whisper_runs": [
+        {
+          "clip": "demo_zh_hardsub",
+          "infer_s": 2.479,
+          "rtf": 0.3099,
+          "segments": 0
+        }
+      ]
+    },
+    "registry": [
+      {
+        "id": "faster-whisper-small",
+        "available": true,
+        "license": "MIT (faster-whisper); Whisper weights MIT",
+        "role": "baseline",
+        "install": "pip install -r requirements-audio.txt"
+      },
+      {
+        "id": "qwen3-asr-0.6b",
+        "available": false,
+        "license": "Apache-2.0",
+        "role": "compare",
+        "package_installed": false,
+        "install": "pip install -U qwen-asr  # Apache-2.0; prefer fresh env (pins transformers)",
+        "model": "Qwen/Qwen3-ASR-0.6B",
+        "note": "Heavy deps; optional. Enable transformers fallback with SUBPARTY_QWEN3_ASR=1"
+      },
+      {
+        "id": "funasr",
+        "available": false,
+        "license": "Apache-2.0 (confirm model card)",
+        "role": "optional",
+        "install": "pip install funasr modelscope",
+        "model": "paraformer-zh"
+      }
+    ],
+    "align_experiments": [
+      {
+        "id": "qwen3-forced-aligner-0.6b",
+        "license": "Apache-2.0",
+        "available": false,
+        "package_hint": false,
+        "install": "pip install -U qwen-asr; set SUBPARTY_FORCED_ALIGNER=1",
+        "model": "Qwen/Qwen3-ForcedAligner-0.6B",
+        "note": "Separate experiment — timestamps a provided transcript vs audio; not Live OCR timing"
+      },
+      {
+        "id": "tinyaligner",
+        "license": "TBD per upstream",
+        "available": false,
+        "install": "experiment stub — wire when a clear Apache/MIT TinyAligner package is chosen",
+        "note": "Placeholder for lightweight forced alignment experiments"
+      }
+    ],
+    "qwen3_license": "Apache-2.0",
+    "default_baseline": "faster-whisper-small"
+  },
+  "runs": [
+    {
+      "clip": "demo_zh_hardsub",
+      "engine_id": "faster-whisper-small",
+      "ok": true,
+      "infer_s": 2.479,
+      "audio_s": 8.0,
+      "rtf": 0.3099,
+      "segment_count": 0,
+      "preview": [],
+      "error": null,
+      "meta": {
+        "language": "zh",
+        "device_note": "faster-whisper small"
+      },
+      "extract_ms": 42.9
+    },
+    {
+      "clip": "demo_zh_hardsub",
+      "engine_id": "qwen3-asr-0.6b",
+      "ok": false,
+      "skipped": true,
+      "reason": "not installed",
+      "status": {
+        "id": "qwen3-asr-0.6b",
+        "available": false,
+        "license": "Apache-2.0",
+        "role": "compare",
+        "package_installed": false,
+        "install": "pip install -U qwen-asr  # Apache-2.0; prefer fresh env (pins transformers)",
+        "model": "Qwen/Qwen3-ASR-0.6B",
+        "note": "Heavy deps; optional. Enable transformers fallback with SUBPARTY_QWEN3_ASR=1"
+      },
+      "extract_ms": 42.9
+    },
+    {
+      "clip": "demo_zh_hardsub",
+      "engine_id": "funasr",
+      "ok": false,
+      "skipped": true,
+      "reason": "not installed",
+      "status": {
+        "id": "funasr",
+        "available": false,
+        "license": "Apache-2.0 (confirm model card)",
+        "role": "optional",
+        "install": "pip install funasr modelscope",
+        "model": "paraformer-zh"
+      },
+      "extract_ms": 42.9
+    },
+    {
+      "clip": "demo_zh_hardsub",
+      "align": {
+        "experiment_id": "qwen3-forced-aligner-0.6b",
+        "ok": false,
+        "skipped": true,
+        "reason": "set SUBPARTY_FORCED_ALIGNER=1 to run (separate experiment)",
+        "infer_s": 0.0,
+        "word_count": 0,
+        "preview": [],
+        "meta": {
+          "id": "qwen3-forced-aligner-0.6b",
+          "license": "Apache-2.0",
+          "available": false,
+          "package_hint": false,
+          "install": "pip install -U qwen-asr; set SUBPARTY_FORCED_ALIGNER=1",
+          "model": "Qwen/Qwen3-ForcedAligner-0.6B",
+          "note": "Separate experiment — timestamps a provided transcript vs audio; not Live OCR timing"
+        }
+      }
+    },
+    {
+      "clip": "demo_zh_hardsub",
+      "align": {
+        "experiment_id": "tinyaligner",
+        "ok": false,
+        "skipped": true,
+        "reason": "TinyAligner not wired — experiment stub only",
+        "infer_s": 0.0,
+        "word_count": 0,
+        "preview": [],
+        "meta": {
+          "id": "tinyaligner",
+          "license": "TBD per upstream",
+          "available": false,
+          "install": "experiment stub — wire when a clear Apache/MIT TinyAligner package is chosen",
+          "note": "Placeholder for lightweight forced alignment experiments"
+        }
+      }
+    },
+    {
+      "clip": "weird-games",
+      "engine_id": "faster-whisper-small",
+      "ok": false,
+      "infer_s": 0.147,
+      "audio_s": 10.0,
+      "rtf": 0.0147,
+      "segment_count": 0,
+      "preview": [],
+      "error": "RuntimeError: Library cublas64_12.dll is not found or cannot be loaded",
+      "meta": {},
+      "extract_ms": 176.8
+    },
+    {
+      "clip": "weird-games",
+      "engine_id": "qwen3-asr-0.6b",
+      "ok": false,
+      "skipped": true,
+      "reason": "not installed",
+      "status": {
+        "id": "qwen3-asr-0.6b",
+        "available": false,
+        "license": "Apache-2.0",
+        "role": "compare",
+        "package_installed": false,
+        "install": "pip install -U qwen-asr  # Apache-2.0; prefer fresh env (pins transformers)",
+        "model": "Qwen/Qwen3-ASR-0.6B",
+        "note": "Heavy deps; optional. Enable transformers fallback with SUBPARTY_QWEN3_ASR=1"
+      },
+      "extract_ms": 176.8
+    },
+    {
+      "clip": "weird-games",
+      "engine_id": "funasr",
+      "ok": false,
+      "skipped": true,
+      "reason": "not installed",
+      "status": {
+        "id": "funasr",
+        "available": false,
+        "license": "Apache-2.0 (confirm model card)",
+        "role": "optional",
+        "install": "pip install funasr modelscope",
+        "model": "paraformer-zh"
+      },
+      "extract_ms": 176.8
+    }
+  ]
+}

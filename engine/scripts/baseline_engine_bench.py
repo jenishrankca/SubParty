@@ -240,55 +240,42 @@ def bench_quality_job(video: Path, *, timeout_s: float = 180.0) -> dict:
 
 
 def bench_asr(video: Path, *, max_audio_s: float = 15.0) -> dict:
-    from audio_verify import whisper_available
-
-    if not whisper_available():
-        return {"ok": False, "skipped": True, "reason": "faster-whisper not available"}
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        return {"ok": False, "skipped": True, "reason": "faster_whisper import failed"}
+    """ASR via adapter (WAV→numpy); avoids faster-whisper PyAV metadata_errors path."""
+    from asr_adapters import FasterWhisperAdapter
 
     duration = probe_duration(video)
     clip_s = min(max_audio_s, max(1.0, duration))
+    adapter = FasterWhisperAdapter()
+    if not adapter.available():
+        return {"ok": False, "skipped": True, "reason": "faster-whisper not available"}
     try:
         with tempfile.TemporaryDirectory(prefix="bench_asr_") as tmp:
             wav = Path(tmp) / "a.wav"
             t_ex0 = time.perf_counter()
             extract_audio_wav(video, wav, start_s=0.0, duration_s=clip_s)
             extract_s = time.perf_counter() - t_ex0
-
-            t_load0 = time.perf_counter()
-            model = WhisperModel("small", device="cpu", compute_type="int8")
-            load_s = time.perf_counter() - t_load0
-
-            t_inf0 = time.perf_counter()
-            segments, info = model.transcribe(str(wav), language="zh", beam_size=1)
-            texts = [s.text.strip() for s in segments if s.text and s.text.strip()]
-            infer_s = time.perf_counter() - t_inf0
-
+            result = adapter.transcribe_wav(wav, audio_duration_s=clip_s)
         return {
-            "ok": True,
+            "ok": result.ok,
+            "skipped": not result.ok,
+            "reason": result.error,
             "video": str(video.relative_to(REPO)) if video.is_relative_to(REPO) else str(video),
             "audio_s": round(clip_s, 2),
             "extract_ms": round(extract_s * 1000, 1),
-            "model_load_ms": round(load_s * 1000, 1),
-            "infer_ms": round(infer_s * 1000, 1),
-            "asr_rtf": round(infer_s / clip_s, 4) if clip_s > 0 else None,
-            "segments": len(texts),
-            "preview": texts[:5],
-            "language": getattr(info, "language", None),
-            "engine": "faster-whisper-small-cpu-int8",
+            "infer_ms": round(result.infer_s * 1000, 1),
+            "asr_rtf": result.rtf,
+            "segments": len(result.segments),
+            "preview": [s.text[:80] for s in result.segments[:5]],
+            "engine": result.engine_id,
+            "harness": "asr_io.load_wav_mono_f32 → ndarray",
         }
     except Exception as exc:
-        # Known: some PyAV builds break faster-whisper decode_audio(metadata_errors=...)
         return {
             "ok": False,
             "skipped": True,
             "reason": f"asr runtime error: {type(exc).__name__}: {exc}",
             "video": str(video.relative_to(REPO)) if video.is_relative_to(REPO) else str(video),
             "audio_s": round(clip_s, 2),
-            "note": "Package available; inference failed — pin av/faster-whisper or use audio_verify path later",
         }
 
 
