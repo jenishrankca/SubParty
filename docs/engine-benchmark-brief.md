@@ -108,4 +108,18 @@ Writes `engine/benchmarks/baseline_<timestamp>.json` and prints a summary table.
 | ASR | skipped (PyAV `metadata_errors` vs faster-whisper) |
 | GeekLink set | deferred |
 
-**Next PR-ready step:** PyAV persistent demux/decode adapter — same crop API, measure decode p50 before/after.  
+### Stage 2 — PyAV persistent decode (landed on this branch)
+
+Default: PyAV long-lived demuxer (`engine/video_decode.py`). FFmpeg seek path remains fallback (`SUBPARTY_DECODE=ffmpeg` or on error).
+
+| Metric (weird-games-5min) | Value |
+|---------------------------|-------|
+| Stage-1 baseline FFmpeg p50 | **238.8 ms** |
+| This run FFmpeg p50 | **72.9 ms** |
+| PyAV p50 | **21.1 ms** |
+| Speedup vs stage-1 baseline | **~11.3×** |
+| Speedup vs this-run FFmpeg | **~3.5×** |
+
+Compare script: `engine/scripts/compare_decode.py` → `engine/benchmarks/decode_compare_latest.json`.
+
+**Next PR-ready step:** wire Live keep-up re-measure (Ready + seek) with PyAV default; optional NVIDIA hwaccel behind same adapter.  

@@ -1,0 +1,177 @@
+{
+  "ok": true,
+  "stage": "2-decode-pyav",
+  "created_utc": "20261123T072529Z",
+  "summary": {
+    "weird_games_ffmpeg_p50_ms": 72.9,
+    "weird_games_pyav_p50_ms": 21.1,
+    "speedup_ffmpeg_over_pyav": 3.45,
+    "vs_stage1_baseline": {
+      "baseline_ffmpeg_p50_ms": 238.8,
+      "pyav_p50_ms": 21.1,
+      "delta_ms": -217.7,
+      "speedup_vs_baseline": 11.32
+    },
+    "default_backend": "pyav (FFmpeg fallback on error / SUBPARTY_DECODE=ffmpeg)"
+  },
+  "weird_games": {
+    "ffmpeg": {
+      "backend": "ffmpeg",
+      "video": "samples\\the-weird-games-5min.mp4",
+      "duration_s": 300.03,
+      "warm_ms": 71.5,
+      "decode": {
+        "n": 12,
+        "mean_ms": 74.7,
+        "p50_ms": 72.9,
+        "p95_ms": 85.5,
+        "min_ms": 65.8,
+        "max_ms": 87.7
+      },
+      "timestamps": [
+        0.5,
+        27.685,
+        54.87,
+        82.055,
+        109.239,
+        136.424,
+        163.609,
+        190.794,
+        217.979,
+        245.164,
+        272.348,
+        299.533
+      ]
+    },
+    "pyav": {
+      "backend": "pyav",
+      "video": "samples\\the-weird-games-5min.mp4",
+      "duration_s": 300.03,
+      "warm_ms": 126.0,
+      "decode": {
+        "n": 12,
+        "mean_ms": 21.6,
+        "p50_ms": 21.1,
+        "p95_ms": 33.8,
+        "min_ms": 6.5,
+        "max_ms": 37.3
+      },
+      "timestamps": [
+        0.5,
+        27.685,
+        54.87,
+        82.055,
+        109.239,
+        136.424,
+        163.609,
+        190.794,
+        217.979,
+        245.164,
+        272.348,
+        299.533
+      ]
+    }
+  },
+  "demos": [
+    {
+      "ffmpeg": {
+        "backend": "ffmpeg",
+        "video": "samples\\demo_zh_hardsub.mp4",
+        "duration_s": 8.0,
+        "warm_ms": 49.8,
+        "decode": {
+          "n": 8,
+          "mean_ms": 52.5,
+          "p50_ms": 53.0,
+          "p95_ms": 56.6,
+          "min_ms": 48.1,
+          "max_ms": 57.5
+        },
+        "timestamps": [
+          0.5,
+          1.5,
+          2.5,
+          3.5,
+          4.5,
+          5.5,
+          6.5,
+          7.5
+        ]
+      },
+      "pyav": {
+        "backend": "pyav",
+        "video": "samples\\demo_zh_hardsub.mp4",
+        "duration_s": 8.0,
+        "warm_ms": 23.6,
+        "decode": {
+          "n": 8,
+          "mean_ms": 18.5,
+          "p50_ms": 9.4,
+          "p95_ms": 49.7,
+          "min_ms": 5.7,
+          "max_ms": 50.1
+        },
+        "timestamps": [
+          0.5,
+          1.5,
+          2.5,
+          3.5,
+          4.5,
+          5.5,
+          6.5,
+          7.5
+        ]
+      }
+    },
+    {
+      "ffmpeg": {
+        "backend": "ffmpeg",
+        "video": "samples\\demo_watermark_junk.mp4",
+        "duration_s": 8.0,
+        "warm_ms": 54.2,
+        "decode": {
+          "n": 8,
+          "mean_ms": 55.1,
+          "p50_ms": 54.5,
+          "p95_ms": 58.7,
+          "min_ms": 52.7,
+          "max_ms": 60.3
+        },
+        "timestamps": [
+          0.5,
+          1.5,
+          2.5,
+          3.5,
+          4.5,
+          5.5,
+          6.5,
+          7.5
+        ]
+      },
+      "pyav": {
+        "backend": "pyav",
+        "video": "samples\\demo_watermark_junk.mp4",
+        "duration_s": 8.0,
+        "warm_ms": 22.1,
+        "decode": {
+          "n": 8,
+          "mean_ms": 20.7,
+          "p50_ms": 9.4,
+          "p95_ms": 57.3,
+          "min_ms": 6.0,
+          "max_ms": 57.9
+        },
+        "timestamps": [
+          0.5,
+          1.5,
+          2.5,
+          3.5,
+          4.5,
+          5.5,
+          6.5,
+          7.5
+        ]
+      }
+    }
+  ]
+}

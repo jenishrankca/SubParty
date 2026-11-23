@@ -1,4 +1,9 @@
-"""ffmpeg / ffprobe helpers for SubParty."""
+"""ffmpeg / ffprobe helpers for SubParty.
+
+Frame extracts prefer PyAV persistent decode (``video_decode``) with this
+module's per-frame FFmpeg subprocess as fallback. Force FFmpeg via
+``SUBPARTY_DECODE=ffmpeg`` or ``video_decode.set_decode_backend("ffmpeg")``.
+"""
 
 from __future__ import annotations
 
@@ -94,7 +99,24 @@ def extract_full_frame(
     scale_width: int = 640,
 ) -> None:
     """Grab one full frame (scaled) for region detection."""
-    sw = max(320, int(scale_width))
+    from video_decode import extract_full_frame_decoded
+
+    extract_full_frame_decoded(
+        Path(video_path),
+        timestamp,
+        Path(out_path),
+        scale_width=scale_width,
+        ffmpeg_fallback=_extract_full_frame_ffmpeg,
+    )
+
+
+def _extract_full_frame_ffmpeg(
+    video_path: Path,
+    timestamp: float,
+    out_path: Path,
+    scale_width: int = 640,
+) -> None:
+    sw = max(240, int(scale_width))
     vf = f"scale={sw}:-1"
     _run_ffmpeg_frame(video_path, timestamp, out_path, vf)
 
@@ -112,7 +134,38 @@ def extract_region(
     width: int | None = None,
     scale_width: int = 640,
 ) -> None:
-    """Crop a normalized region of the frame for OCR."""
+    """Crop a normalized region of the frame for OCR (PyAV preferred, FFmpeg fallback)."""
+    from video_decode import extract_region_decoded
+
+    extract_region_decoded(
+        Path(video_path),
+        timestamp,
+        Path(out_path),
+        x_ratio=x_ratio,
+        y_ratio=y_ratio,
+        w_ratio=w_ratio,
+        h_ratio=h_ratio,
+        height=height,
+        width=width,
+        scale_width=scale_width,
+        ffmpeg_fallback=_extract_region_ffmpeg,
+    )
+
+
+def _extract_region_ffmpeg(
+    video_path: Path,
+    timestamp: float,
+    out_path: Path,
+    *,
+    x_ratio: float,
+    y_ratio: float,
+    w_ratio: float,
+    h_ratio: float,
+    height: int | None = None,
+    width: int | None = None,
+    scale_width: int = 640,
+) -> None:
+    """Legacy per-frame FFmpeg seek path (fallback / A/B)."""
     if height is None or width is None:
         probed_w, probed_h = probe_size(video_path)
         if width is None:
