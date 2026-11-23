@@ -189,6 +189,26 @@ def compare_ocr_vs_speech(
     )
 
 
+def _edit_distance_cjk(a: str, b: str) -> int:
+    na, nb = normalize_zh(a), normalize_zh(b)
+    if na == nb:
+        return 0
+    if not na:
+        return len(nb)
+    if not nb:
+        return len(na)
+    prev = list(range(len(nb) + 1))
+    for i, ca in enumerate(na, start=1):
+        cur = [i]
+        for j, cb in enumerate(nb, start=1):
+            ins = cur[j - 1] + 1
+            delete = prev[j] + 1
+            sub = prev[j - 1] + (0 if ca == cb else 1)
+            cur.append(min(ins, delete, sub))
+        prev = cur
+    return prev[-1]
+
+
 def reconcile_zh(
     *,
     original_ocr: str,
@@ -197,8 +217,8 @@ def reconcile_zh(
     asr_confidence: float,
 ) -> tuple[str, str]:
     """
-    Return (reconciled_zh, note). Never silently replace OCR.
-    Only adopt audio into reconciled_zh with explicit evidence.
+    Return (reconciled_zh, note). Never silently replace OCR without evidence.
+    `original_ocr` must always be preserved by the caller as the OCR source field.
     """
     ocr = (original_ocr or "").strip()
     aud = (audio_zh or "").strip()
@@ -206,6 +226,18 @@ def reconcile_zh(
         return ocr, "keep-ocr-no-audio"
     if not ocr and aud and asr_confidence >= 0.45:
         return aud, "adopt-audio-ocr-empty"
+    # High ASR + near-OCR: treat as OCR typo fix (small edit distance)
+    if (
+        ocr
+        and aud
+        and asr_confidence >= 0.7
+        and compare.char_similarity >= 0.72
+        and normalize_zh(ocr) != normalize_zh(aud)
+    ):
+        dist = _edit_distance_cjk(ocr, aud)
+        max_len = max(len(normalize_zh(ocr)), len(normalize_zh(aud)), 1)
+        if dist <= 2 and dist / max_len <= 0.35:
+            return aud, "adopt-audio-ocr-typo"
     if compare.disagreement and asr_confidence >= 0.75 and compare.char_similarity < 0.35:
         # Strong ASR, weak overlap — keep OCR as source of truth; flag only
         return ocr, "keep-ocr-flag-disagreement"
@@ -380,7 +412,7 @@ def verify_cue_records(
             compare=cmp.as_dict(),
             notes=note,
         )
-        # Attach without clobbering OCR source
+        # Attach without clobbering OCR source field
         setattr(rec, "audio_transcript", aud)
         setattr(rec, "audio_evidence", ev)
         setattr(rec, "reconciled_zh", reconciled)
@@ -388,15 +420,29 @@ def verify_cue_records(
         if not getattr(rec, "original_ocr", None):
             setattr(rec, "original_ocr", ocr)
 
-        # EN refresh only when reconciled differs from displayed ZH and not a raw disagreement adopt
-        if (
-            translate_fn
+        # Evidence-only ZH update: keep original_ocr; may revise text_zh on typo/empty adopt
+        apply_zh = bool(
+            note in {"adopt-audio-ocr-typo", "adopt-audio-ocr-empty"}
             and reconciled
             and reconciled != (getattr(rec, "text_zh", "") or "")
-            and note in {"confirm-ocr", "adopt-audio-ocr-empty"}
+        )
+        setattr(rec, "original_ocr", ocr)
+        if apply_zh:
+            if hasattr(rec, "revise"):
+                rec.revise(
+                    text_zh=reconciled,
+                    reason=f"audio-reconcile:{note}",
+                    maturity=getattr(rec, "maturity", "context-refined"),
+                )
+            else:
+                setattr(rec, "text_zh", reconciled)
+
+        # EN refresh when evidence supports adopt (ZH already updated) or confirm path
+        if translate_fn and reconciled and (
+            apply_zh or note in {"confirm-ocr", "adopt-audio-ocr-empty", "adopt-audio-ocr-typo"}
         ):
             try:
-                new_en = translate_fn(reconciled)
+                new_en = translate_fn(reconciled if apply_zh else (getattr(rec, "text_zh", "") or reconciled))
                 if new_en and hasattr(rec, "revise"):
                     rec.revise(
                         text_en=new_en,
@@ -408,6 +454,16 @@ def verify_cue_records(
 
         evidence_list.append(ev.as_dict())
 
+    # Stage 5: speech-aligned timing (ASR bounds → cue start/end)
+    speech_summary: dict[str, Any] = {}
+    try:
+        from speech_align import align_cue_records_to_speech
+
+        speech_summary = align_cue_records_to_speech(records, segs)
+    except Exception as exc:
+        logger.warning("speech align skipped: %s", exc)
+        speech_summary = {"ok": False, "error": str(exc), "aligned": 0}
+
     return {
         "ok": True,
         "cues": len(records),
@@ -416,6 +472,7 @@ def verify_cue_records(
         "engine": "faster-whisper",
         "model_size": model_size,
         "evidence": evidence_list,
+        "speech_align": speech_summary,
     }
 
 

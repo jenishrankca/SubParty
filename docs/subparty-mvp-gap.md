@@ -116,11 +116,27 @@
 
 ## Close order (this pass)
 
-1. Metrics: CER, ASR CER, timing ms, revision before/after  
-2. Reconcile: evidence typo-adopt (preserve `original_ocr`)  
-3. Speech-aligned timing pass after ASR verify  
+1. Metrics: CER, ASR CER, timing ms, revision before/after — **landed** (`metrics.py`, `tests/test_mvp_metrics.py`)  
+2. Reconcile: evidence typo-adopt (preserve `original_ocr`) — **landed** (`adopt-audio-ocr-typo`)  
+3. Speech-aligned timing pass after ASR verify — **landed** (`speech_align.py`, wired in `verify_cue_records`)  
 4. Unit benches for all of the above; incremental commits to `main`  
 5. Stages 6–9 only after Critical benches hold
+
+### First Critical fixes landed (retestable)
+
+```bat
+cd engine
+.venv\Scripts\python.exe -m unittest tests.test_mvp_metrics tests.test_speech_align tests.test_audio_verify -v
+```
+
+| Fix | Stage | Notes |
+| --- | --- | --- |
+| `cer` / `ocr_cer` / `asr_cer` / timing **ms** + p95 | 1–2, 7 | `summarize_job_metrics` extended |
+| `revision_before_after` on ambiguous fixture | 4 | provisional EN CER → gold |
+| `adopt-audio-ocr-typo` | 3 | keeps `original_ocr`; may update `text_zh` |
+| `align_cue_records_to_speech` | 5 | ASR bounds revise start/end with `speech-align` reason |
+
+Remaining Critical polish: broader annotated video suite (accents/noise/fonts), ASR RTF bench, word-level timestamps for finer align. Stages **6–9 still deferred**.
 
 ## Validation targets (MVP)
 

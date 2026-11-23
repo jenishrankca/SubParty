@@ -627,6 +627,7 @@ class JobManager:
                         job.audio_summary = summary
                         for rec in job.cue_records:
                             self._publish_record(job, writer, rec)
+                        speech = summary.get("speech_align") or {}
                         self._emit(
                             job,
                             {
@@ -637,6 +638,7 @@ class JobManager:
                                     "segments": summary.get("segments"),
                                     "model_size": summary.get("model_size"),
                                     "engine": summary.get("engine"),
+                                    "speech_aligned": speech.get("aligned", 0),
                                 },
                             },
                         )
