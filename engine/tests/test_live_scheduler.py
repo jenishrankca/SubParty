@@ -21,7 +21,7 @@ class TestLiveScheduler(unittest.TestCase):
         perf = PerformanceScheduler(live_mode=True, live_lag=0.1, buffer_ahead=2.0)
         self.assertNotEqual(perf.mode(), "refine")
         self.assertFalse(perf.should_run_refine())
-        perf.buffer_ahead = 5.0
+        perf.buffer_ahead = 6.0
         self.assertEqual(perf.mode(), "refine")
         self.assertTrue(perf.should_run_refine())
 

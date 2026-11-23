@@ -27,8 +27,8 @@ class PerformanceScheduler:
     live_mode: bool = True
 
     def mode(self) -> str:
-        # Live: catch up when lagging OR buffer thin — prefer feeding the overlay
-        if self.live_mode and (self.live_lag > 0.6 or self.buffer_ahead < 3.0):
+        # Live: catch up when lagging OR buffer thin
+        if self.live_mode and (self.live_lag > 0.5 or self.buffer_ahead < 2.5):
             return "catch_up"
         if self.live_lag > 1.0:
             return "catch_up"
@@ -40,17 +40,23 @@ class PerformanceScheduler:
         """min,max sample interval for current mode."""
         mode = self.mode()
         if self.live_mode:
-            # Catch-up densifies (smaller max stride) — do not jump to 3.5s holes at 1×
+            # COARSE strides so media advances ≥ wall OCR cost (keep-up at 1×)
+            # Densifying when OCR is slow makes buffer_ahead collapse.
             if mode == "catch_up":
-                return 0.8, 1.6
+                return 2.0, 8.0
             if mode == "refine":
-                return 0.9, 1.8
-            return 0.9, 1.8
+                return 2.0, 5.0
+            return 2.0, 6.0
         if mode == "catch_up":
             return 0.9, 2.8
         if mode == "refine":
             return 0.45, 1.2
         return 0.5, 1.8
+
+    def live_keepup_stride_s(self) -> float:
+        """Media seconds per OCR sample so frontier can race a 1× playhead."""
+        # avg_slot_s is wall time per sample; stride must be ≥ that
+        return max(2.0, min(10.0, float(self.avg_slot_s or 1.5) * 1.12))
 
     def should_run_refine(self) -> bool:
         if self.live_mode:

@@ -175,7 +175,15 @@ def _argos_cached(text: str, src: str, tgt: str) -> str:
     _ensure_argos(src, tgt)
     import argostranslate.translate
 
-    return argostranslate.translate.translate(text, src, tgt).strip()
+    raw = argostranslate.translate.translate(text, src, tgt).strip()
+    # Light Live-safe cleanup (dedupe / drop CJK echo) — no LLM
+    try:
+        from en_clean import clean_en
+
+        # Empty = garbage dropped (caller shows ZH); never re-emit raw echo/repeats
+        return clean_en(raw, zh=text)
+    except Exception:
+        return raw
 
 
 class NLLBEngine(TranslationEngine):

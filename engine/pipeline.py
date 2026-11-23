@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -42,14 +43,18 @@ _MAX_INTERVAL = 2.8
 _MIN_INTERVAL_ACCURACY = 0.35
 _DEFAULT_LOOKAHEAD = 10.0
 # Live: keep a deeper playhead-ahead window so 1× watch does not drain the buffer
-_DEFAULT_LOOKAHEAD_LIVE = 12.0
-_LIVE_BUFFER_TARGET_S = 5.0  # maintain ≥ this many seconds ahead while watching
-_LIVE_BUFFER_REFILL_S = 3.0  # densify when buffer dips below this
+_DEFAULT_LOOKAHEAD_LIVE = 14.0
+_LIVE_BUFFER_TARGET_S = 4.0  # maintain ≥ this many seconds ahead while watching
+_LIVE_READY_BUFFER_S = 2.5  # priming ends once this ahead exists (Ready ≤15s)
 _SEEK_COOLDOWN_S = 2.0  # after seek: snap to playhead, drop backlog
 _DEFAULT_CONTEXT_WINDOW_S = 120.0
 _LIVE_CONTEXT_WINDOW_S = 30.0
-_LIVE_SCALE_WIDTH = 320
+# Live crop: smaller = faster OCR; 256 is a quality/speed compromise
+_LIVE_SCALE_WIDTH = 256
 _QUALITY_SCALE_WIDTH = 640
+# Live media stride floors — must track wall OCR cost so frontier ≥ 1× playhead
+_LIVE_MIN_STRIDE_S = 2.0
+_LIVE_MAX_STRIDE_S = 10.0
 
 
 @dataclass
@@ -481,8 +486,8 @@ class JobManager:
                 },
             )
 
-            # Live: 1.0s grid (fewer OCR); quality: 0.5s fine grid
-            base_tick = 1.0 if job.live_mode else 0.5
+            # Live: 2.0s grid + coarse stride (OCR often 2–5s wall); quality: 0.5s fine
+            base_tick = 2.0 if job.live_mode else 0.5
             scale_w = _LIVE_SCALE_WIDTH if job.live_mode else _QUALITY_SCALE_WIDTH
             n_ticks = max(1, int(duration / base_tick) + 1)
             done: set[int] = set()
@@ -501,333 +506,381 @@ class JobManager:
             last_playhead = job.playhead
             last_playhead_wall = time.perf_counter()
             translate_warmed = not job.live_mode
-            # Live cold-start: dense ticks until a small buffer exists (≤30s Ready)
+            # Live cold-start: race ahead of playhead until Ready buffer exists
             live_priming = job.live_mode
+            decode_pool: ThreadPoolExecutor | None = (
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-decode")
+                if job.live_mode
+                else None
+            )
+            decode_future: Future[None] | None = None
+            decode_future_tick: int | None = None
 
-            with tempfile.TemporaryDirectory(prefix="subparty_") as tmp:
-                tmp_dir = Path(tmp)
+            def _shutdown_decode_pool() -> None:
+                nonlocal decode_pool, decode_future
+                if decode_pool is None:
+                    return
+                try:
+                    if decode_future is not None:
+                        decode_future.cancel()
+                except Exception:
+                    pass
+                try:
+                    decode_pool.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    decode_pool.shutdown(wait=False)
+                except Exception:
+                    pass
+                decode_pool = None
+                decode_future = None
 
-                while not job._cancel.is_set():
-                    if len(done) >= n_ticks:
-                        break
+            try:
+                with tempfile.TemporaryDirectory(prefix="subparty_") as tmp:
+                    tmp_dir = Path(tmp)
 
-                    # Pause support — park until resumed or cancelled
-                    while job.paused and not job._cancel.is_set():
-                        job.status = "paused"
-                        self._persist(job)
-                        job._pause.wait(timeout=0.5)
-                        job._pause.clear()
-                    if job._cancel.is_set():
-                        break
-                    if job.status == "paused":
-                        job.status = "running"
-                        self._emit(job, {"type": "status", "status": "running", "progress": job.progress})
+                    while not job._cancel.is_set():
+                        if len(done) >= n_ticks:
+                            break
 
-                    seeked = job._seek_event.is_set()
-                    job._seek_event.clear()
-                    if seeked:
-                        seek_until = time.perf_counter() + _SEEK_COOLDOWN_S
-                        # Drop ALL unfinished backlog behind new playhead — retarget now
+                        # Pause support — park until resumed or cancelled
+                        while job.paused and not job._cancel.is_set():
+                            job.status = "paused"
+                            self._persist(job)
+                            job._pause.wait(timeout=0.5)
+                            job._pause.clear()
+                        if job._cancel.is_set():
+                            break
+                        if job.status == "paused":
+                            job.status = "running"
+                            self._emit(job, {"type": "status", "status": "running", "progress": job.progress})
+
+                        seeked = job._seek_event.is_set()
+                        job._seek_event.clear()
+                        if seeked:
+                            seek_until = time.perf_counter() + _SEEK_COOLDOWN_S
+                            # Drop ALL unfinished backlog behind new playhead — retarget now
+                            with job._playhead_lock:
+                                ph_now = job.playhead
+                            ph_tick0 = max(0, int(ph_now / base_tick))
+                            for s in range(0, ph_tick0):
+                                if s not in done:
+                                    done.add(s)
+                                    slot_text.setdefault(s, "")
+                                    slot_conf.setdefault(s, 0.0)
+                            lag_ema = 0.0  # reset lag estimate after seek
+                            if job.live_mode:
+                                live_priming = True  # dense re-buffer around new playhead
+
                         with job._playhead_lock:
-                            ph_now = job.playhead
-                        ph_tick0 = max(0, int(ph_now / base_tick))
-                        for s in range(0, ph_tick0):
-                            if s not in done:
-                                done.add(s)
-                                slot_text.setdefault(s, "")
-                                slot_conf.setdefault(s, 0.0)
-                        lag_ema = 0.0  # reset lag estimate after seek
+                            playhead = job.playhead
+
+                        wall = time.perf_counter()
+                        dt_wall = max(1e-3, wall - last_playhead_wall)
+                        playhead_vel = (playhead - last_playhead) / dt_wall  # ~1.0 when watching 1×
+                        last_playhead = playhead
+                        last_playhead_wall = wall
+                        scrubbing = abs(playhead_vel) > 2.5
+
+                        # Adaptive interval from recent OCR cost + lag + dialogue density
+                        avg_s = (sum(timings) / len(timings)) if timings else interval
+                        lag = job.live_lag
+                        lag_ema = 0.65 * lag_ema + 0.35 * lag if timings else lag
+                        in_seek = wall < seek_until
+                        perf.live_lag = lag_ema
+                        perf.buffer_ahead = job.buffer_ahead
+                        perf.avg_slot_s = avg_s
+                        perf.live_mode = job.live_mode
+                        min_iv, max_iv = perf.ocr_interval_bounds()
+                        if job.high_accuracy and not job.live_mode and perf.mode() != "catch_up":
+                            min_iv = min(min_iv, _MIN_INTERVAL_ACCURACY)
+
                         if job.live_mode:
-                            live_priming = True  # dense re-buffer around new playhead
-
-                    with job._playhead_lock:
-                        playhead = job.playhead
-
-                    wall = time.perf_counter()
-                    dt_wall = max(1e-3, wall - last_playhead_wall)
-                    playhead_vel = (playhead - last_playhead) / dt_wall  # ~1.0 when watching 1×
-                    last_playhead = playhead
-                    last_playhead_wall = wall
-                    scrubbing = abs(playhead_vel) > 2.5
-
-                    # Adaptive interval from recent OCR cost + lag + dialogue density
-                    avg_s = (sum(timings) / len(timings)) if timings else interval
-                    lag = job.live_lag
-                    lag_ema = 0.65 * lag_ema + 0.35 * lag if timings else lag
-                    in_seek = wall < seek_until
-                    perf.live_lag = lag_ema
-                    perf.buffer_ahead = job.buffer_ahead
-                    perf.avg_slot_s = avg_s
-                    perf.live_mode = job.live_mode
-                    min_iv, max_iv = perf.ocr_interval_bounds()
-                    if job.high_accuracy and not job.live_mode and perf.mode() != "catch_up":
-                        min_iv = min(min_iv, _MIN_INTERVAL_ACCURACY)
-
-                    # Live refill: keep sampling densely while buffer_ahead is thin at 1×
-                    live_refill = (
-                        job.live_mode
-                        and not in_seek
-                        and not scrubbing
-                        and job.buffer_ahead < _LIVE_BUFFER_REFILL_S
-                    )
-                    if (
-                        (live_priming and job.buffer_ahead < _LIVE_BUFFER_TARGET_S)
-                        or live_refill
-                    ) and not in_seek and not scrubbing:
-                        # Dense contiguous samples until Ready / refill target
-                        interval = base_tick
-                        lookahead = max(base_lookahead, _DEFAULT_LOOKAHEAD_LIVE)
-                        stride_ticks = 1
-                    elif in_seek or lag_ema > 3.5 or scrubbing:
-                        interval = min(max_iv, max(avg_s * 1.15, 1.5 if job.live_mode else 1.2))
-                        lookahead = 3.0 if scrubbing else (6.0 if job.live_mode else 5.0)
-                        stride_ticks = max(1, int(round(interval / base_tick)))
-                    elif lag_ema > 1.0:
-                        interval = min(max_iv, max(avg_s * 1.05, 1.0 if job.live_mode else 0.95))
-                        # Live: still look ahead while catching up — do not shrink window
-                        lookahead = (
-                            max(_LIVE_BUFFER_TARGET_S, base_lookahead)
-                            if job.live_mode
-                            else max(4.0, base_lookahead * 0.65)
-                        )
-                        stride_ticks = max(1, int(round(interval / base_tick)))
-                    elif lag_ema < -1.5 and dialogue_streak > 0 and not job.live_mode:
-                        interval = max(min_iv, min(avg_s * 0.8, 0.7))
-                        lookahead = min(20.0, base_lookahead * 1.4)
-                        stride_ticks = max(1, int(round(interval / base_tick)))
-                    elif lag_ema < -1.0 and not job.live_mode:
-                        interval = max(min_iv, min(avg_s * 0.9, 0.9))
-                        lookahead = min(16.0, base_lookahead * 1.2)
-                        stride_ticks = max(1, int(round(interval / base_tick)))
-                    else:
-                        if job.live_mode:
-                            # Prefer staying ahead of 1× playhead even when OCR is slower than realtime
-                            target = max(min(avg_s * 0.95, 1.0), 0.85)
-                            lookahead = max(base_lookahead, _DEFAULT_LOOKAHEAD_LIVE)
+                            # Keep-up law: media stride ≥ wall OCR cost (never densify when slow)
+                            keep_s = max(
+                                _LIVE_MIN_STRIDE_S,
+                                min(_LIVE_MAX_STRIDE_S, perf.live_keepup_stride_s()),
+                            )
+                            if blank_streak >= 2:
+                                keep_s = min(_LIVE_MAX_STRIDE_S, keep_s * 1.25)
+                            if blank_streak >= 5:
+                                keep_s = min(_LIVE_MAX_STRIDE_S, keep_s * 1.35)
+                            if in_seek or scrubbing:
+                                keep_s = min(_LIVE_MAX_STRIDE_S, max(keep_s, 3.0))
+                                lookahead = 4.0 if scrubbing else max(8.0, base_lookahead)
+                            else:
+                                lookahead = max(base_lookahead, _DEFAULT_LOOKAHEAD_LIVE)
+                            interval = keep_s
+                            stride_ticks = max(1, int(round(keep_s / base_tick)))
+                        elif in_seek or lag_ema > 3.5 or scrubbing:
+                            interval = min(max_iv, max(avg_s * 1.15, 1.2))
+                            lookahead = 3.0 if scrubbing else 5.0
+                            stride_ticks = max(1, int(round(interval / base_tick)))
+                        elif lag_ema > 1.0:
+                            interval = min(max_iv, max(avg_s * 1.05, 0.95))
+                            lookahead = max(4.0, base_lookahead * 0.65)
+                            stride_ticks = max(1, int(round(interval / base_tick)))
+                        elif lag_ema < -1.5 and dialogue_streak > 0:
+                            interval = max(min_iv, min(avg_s * 0.8, 0.7))
+                            lookahead = min(20.0, base_lookahead * 1.4)
+                            stride_ticks = max(1, int(round(interval / base_tick)))
+                        elif lag_ema < -1.0:
+                            interval = max(min_iv, min(avg_s * 0.9, 0.9))
+                            lookahead = min(16.0, base_lookahead * 1.2)
+                            stride_ticks = max(1, int(round(interval / base_tick)))
                         else:
                             target = max(avg_s * 1.02, 0.5 if avg_s < 0.55 else 0.7)
+                            interval = max(min_iv, min(max_iv, target))
                             lookahead = base_lookahead
-                        interval = max(min_iv, min(max_iv, target))
-                        stride_ticks = max(1, int(round(interval / base_tick)))
+                            stride_ticks = max(1, int(round(interval / base_tick)))
+                            if blank_streak >= 2:
+                                stride_ticks = max(stride_ticks, int(round(1.4 / base_tick)))
+                            if blank_streak >= 5:
+                                stride_ticks = max(stride_ticks, int(round(2.2 / base_tick)))
+                        if (
+                            dialogue_streak >= 2
+                            and lag_ema < 0.8
+                            and not in_seek
+                            and not job.live_mode
+                        ):
+                            stride_ticks = max(1, min(stride_ticks, int(round(0.55 / base_tick))))
 
-                    if not live_priming and not live_refill:
-                        if blank_streak >= 2:
-                            stride_ticks = max(
-                                stride_ticks,
-                                int(round((1.5 if job.live_mode else 1.4) / base_tick)),
-                            )
-                        if blank_streak >= 5 and not job.live_mode:
-                            stride_ticks = max(
-                                stride_ticks,
-                                int(round(2.2 / base_tick)),
-                            )
-                        # Live: never stride >2s while buffer is only moderately healthy
-                        if job.live_mode and job.buffer_ahead < _LIVE_BUFFER_TARGET_S:
-                            stride_ticks = min(stride_ticks, max(1, int(round(1.2 / base_tick))))
-                    if (
-                        dialogue_streak >= 2
-                        and lag_ema < 0.8
-                        and not in_seek
-                        and not job.live_mode
-                    ):
-                        stride_ticks = max(1, min(stride_ticks, int(round(0.55 / base_tick))))
+                        job.sample_interval = stride_ticks * base_tick
 
-                    job.sample_interval = stride_ticks * base_tick
+                        # Transition-aware densify only in quality mode
+                        tick = None
+                        if perf.should_dense_transitions() and job.high_accuracy and done:
+                            last_done = max(done)
+                            for cand in transition_ticks(slot_text, done, around=last_done, radius=3):
+                                ph = max(0, int(playhead / base_tick))
+                                if abs(cand - ph) <= int(lookahead / base_tick) + 2:
+                                    tick = cand
+                                    break
 
-                    # Transition-aware densify only in quality mode
-                    tick = None
-                    if perf.should_dense_transitions() and job.high_accuracy and done:
-                        last_done = max(done)
-                        for cand in transition_ticks(slot_text, done, around=last_done, radius=3):
-                            ph = max(0, int(playhead / base_tick))
-                            if abs(cand - ph) <= int(lookahead / base_tick) + 2:
-                                tick = cand
-                                break
-
-                    # Only "lagging" when actually behind / seeking — NOT always after priming.
-                    # Always-lagging after Ready was snapping to playhead and never building ahead.
-                    actually_lagging = (
-                        lag_ema > 0.8
-                        or in_seek
-                        or scrubbing
-                        or (job.live_mode and job.buffer_ahead <= 0.05 and lag_ema > 0.2)
-                    )
-                    if tick is None:
-                        tick = _pick_next_tick(
-                            done=done,
-                            n_ticks=n_ticks,
-                            base_tick=base_tick,
-                            playhead=playhead,
-                            lookahead=lookahead,
-                            stride_ticks=stride_ticks,
-                            lagging=actually_lagging,
-                            near_window_s=(
-                                3.0
-                                if (live_priming or live_refill)
-                                else (
-                                    2.0
-                                    if job.live_mode
-                                    else (1.4 if (dialogue_streak or lag_ema < 0.5) else 0.7)
-                                )
-                            ),
+                        actually_lagging = (
+                            lag_ema > 0.8
+                            or in_seek
+                            or scrubbing
+                            or (job.live_mode and job.buffer_ahead <= 0.05 and lag_ema > 0.2)
                         )
-                    if tick is None:
-                        break
+                        if tick is None:
+                            tick = _pick_next_tick(
+                                done=done,
+                                n_ticks=n_ticks,
+                                base_tick=base_tick,
+                                playhead=playhead,
+                                lookahead=lookahead,
+                                stride_ticks=stride_ticks,
+                                lagging=actually_lagging,
+                                near_window_s=(
+                                    4.0
+                                    if (live_priming and job.live_mode)
+                                    else (
+                                        2.5
+                                        if job.live_mode
+                                        else (1.4 if (dialogue_streak or lag_ema < 0.5) else 0.7)
+                                    )
+                                ),
+                            )
+                        if tick is None:
+                            break
 
-                    # If a seek arrived while we were picking, drop this tick and retarget
-                    if job._seek_event.is_set():
-                        continue
-
-                    t = min(duration, tick * base_tick)
-                    frame_path = tmp_dir / f"frame_{tick:07d}.png"
-                    t0 = time.perf_counter()
-                    try:
-                        extract_region(
-                            video,
-                            t,
-                            frame_path,
-                            x_ratio=region.x,
-                            y_ratio=region.y,
-                            w_ratio=region.w,
-                            h_ratio=region.h,
-                            height=frame_h,
-                            width=frame_w,
-                            scale_width=scale_w,
-                        )
-                        # Seek mid-extract: discard result and retarget
+                        # If a seek arrived while we were picking, drop this tick and retarget
                         if job._seek_event.is_set():
                             continue
-                        filtered = filter_ocr_result(ocr_lines(str(frame_path)))
-                        zh = filtered.text
-                        conf = filtered.confidence
-                    except Exception as exc:
-                        logger.warning("frame @%.2fs failed: %s", t, exc)
-                        zh = ""
-                        conf = 0.0
-                    elapsed = time.perf_counter() - t0
-                    timings.append(elapsed)
-                    if len(timings) > 30:
-                        timings = timings[-30:]
 
-                    # Seek during OCR: do not commit this tick (wrong region)
-                    if job._seek_event.is_set():
-                        continue
+                        t = min(duration, tick * base_tick)
+                        frame_path = tmp_dir / f"frame_{tick:07d}.png"
+                        t0 = time.perf_counter()
 
-                    done.add(tick)
-                    slot_text[tick] = zh
-                    slot_conf[tick] = conf if zh else 0.0
-                    # Live stride: fill intentional holes so buffer_ahead advances contiguously
-                    if job.live_mode and stride_ticks > 1:
-                        for s in range(max(0, tick - stride_ticks + 1), tick):
-                            if s not in done:
-                                done.add(s)
-                                slot_text.setdefault(s, zh if zh else "")
-                                slot_conf.setdefault(s, conf if zh else 0.0)
-                    # When lagging / seeking / live catch-up: skip unfinished ticks behind playhead
-                    if lag_ema > 1.2 or in_seek or (job.live_mode and lag_ema > 0.5):
-                        ph_tick = max(0, int(playhead / base_tick))
-                        skip_back = ph_tick if in_seek else int((4.0 if job.live_mode else 2.0) / base_tick)
-                        for s in range(max(0, ph_tick - skip_back), ph_tick):
-                            if s not in done:
-                                done.add(s)
-                                slot_text.setdefault(s, "")
-                                slot_conf.setdefault(s, 0.0)
+                        def _decode_one(path: Path, ts: float) -> None:
+                            extract_region(
+                                video,
+                                ts,
+                                path,
+                                x_ratio=region.x,
+                                y_ratio=region.y,
+                                w_ratio=region.w,
+                                h_ratio=region.h,
+                                height=frame_h,
+                                width=frame_w,
+                                scale_width=scale_w,
+                            )
 
-                    if zh:
-                        blank_streak = 0
-                        dialogue_streak = min(8, dialogue_streak + 1)
-                        if not translate_warmed:
-                            try:
-                                warm_translate(job.engine_id)
-                            except Exception as exc:
-                                logger.warning("deferred translate warm failed: %s", exc)
-                            translate_warmed = True
-                    else:
-                        blank_streak += 1
-                        dialogue_streak = max(0, dialogue_streak - 1)
-                    if zh and zh == last_zh:
-                        # Same dialogue — fill nearby unfinished ticks cheaply
-                        fill_to = stride_ticks + (1 if dialogue_streak >= 2 else 0)
-                        for s in range(tick + 1, min(n_ticks, tick + fill_to)):
-                            if s not in done:
-                                done.add(s)
-                                slot_text[s] = zh
-                                slot_conf[s] = conf
-                    last_zh = zh
+                        try:
+                            # Overlap: reuse prefetch decode when it matches this tick
+                            if (
+                                decode_future is not None
+                                and decode_future_tick == tick
+                                and decode_future.done()
+                            ):
+                                decode_future.result()
+                                decode_future = None
+                                decode_future_tick = None
+                            elif decode_future is not None and decode_future_tick == tick:
+                                decode_future.result()
+                                decode_future = None
+                                decode_future_tick = None
+                            else:
+                                if decode_future is not None:
+                                    try:
+                                        decode_future.cancel()
+                                    except Exception:
+                                        pass
+                                    decode_future = None
+                                    decode_future_tick = None
+                                _decode_one(frame_path, t)
+                            if job._seek_event.is_set():
+                                continue
+                            filtered = filter_ocr_result(ocr_lines(str(frame_path)))
+                            zh = filtered.text
+                            conf = filtered.confidence
+                        except Exception as exc:
+                            logger.warning("frame @%.2fs failed: %s", t, exc)
+                            zh = ""
+                            conf = 0.0
+                        elapsed = time.perf_counter() - t0
+                        timings.append(elapsed)
+                        if len(timings) > 30:
+                            timings = timings[-30:]
 
-                    job.current_time = t
-                    covered = max((s for s in done), default=0) * base_tick
-                    job.progress = min(1.0, covered / duration) if duration > 0 else 1.0
+                        # Prefetch next Live decode while we emit/translate
+                        if decode_pool is not None and job.live_mode and not job._seek_event.is_set():
+                            next_tick = tick + stride_ticks
+                            if next_tick < n_ticks and next_tick not in done:
+                                next_path = tmp_dir / f"frame_{next_tick:07d}.png"
+                                next_ts = min(duration, next_tick * base_tick)
+                                decode_future = decode_pool.submit(_decode_one, next_path, next_ts)
+                                decode_future_tick = next_tick
 
-                    cue_serial = self._emit_merged_runs(
-                        job,
-                        writer,
-                        slot_text,
-                        slot_conf,
-                        done,
-                        base_tick,
-                        duration,
-                        emitted_runs,
-                        cue_serial,
-                        dial_ctx,
-                        buffer,
-                    )
+                        # Seek during OCR: do not commit this tick (wrong region)
+                        if job._seek_event.is_set():
+                            continue
 
-                    # Buffer ahead / lag relative to playhead
-                    ph_tick = max(0, int(playhead / base_tick))
-                    frontier = ph_tick - 1
-                    s = ph_tick
-                    while s < n_ticks and s in done:
-                        frontier = s
-                        s += 1
-                    frontier_t = frontier * base_tick if frontier >= 0 else playhead - 30
-                    job.live_lag = playhead - frontier_t
-                    job.buffer_ahead = max(0.0, frontier_t - playhead)
-                    if live_priming and job.buffer_ahead >= _LIVE_BUFFER_TARGET_S:
-                        live_priming = False
-                    observed_until = max(playhead, frontier_t, t)
+                        done.add(tick)
+                        slot_text[tick] = zh
+                        slot_conf[tick] = conf if zh else 0.0
+                        # Live: fill stride window so buffer_ahead jumps by ~keep_s per OCR
+                        if job.live_mode and stride_ticks > 1:
+                            for s in range(max(0, tick - stride_ticks + 1), tick):
+                                if s not in done:
+                                    done.add(s)
+                                    slot_text.setdefault(s, zh if zh else "")
+                                    slot_conf.setdefault(s, conf if zh else 0.0)
+                            # Silence / blank: also claim forward ticks to race playhead
+                            if not zh:
+                                for s in range(tick + 1, min(n_ticks, tick + stride_ticks)):
+                                    if s not in done:
+                                        done.add(s)
+                                        slot_text.setdefault(s, "")
+                                        slot_conf.setdefault(s, 0.0)
+                        # When lagging / seeking / live catch-up: skip unfinished ticks behind playhead
+                        if lag_ema > 1.2 or in_seek or (job.live_mode and lag_ema > 0.5):
+                            ph_tick = max(0, int(playhead / base_tick))
+                            skip_back = ph_tick if in_seek else int((4.0 if job.live_mode else 2.0) / base_tick)
+                            for s in range(max(0, ph_tick - skip_back), ph_tick):
+                                if s not in done:
+                                    done.add(s)
+                                    slot_text.setdefault(s, "")
+                                    slot_conf.setdefault(s, 0.0)
 
-                    # Retroactive refine when scheduler allows (deferred on live path)
-                    if perf.should_run_refine() and job.cue_records:
-                        changed = refine_batch(
-                            job.cue_records,
-                            dial_ctx=dial_ctx,
-                            buffer=buffer,
-                            limit=1 if job.live_mode else (4 if perf.mode() == "refine" else 2),
-                            observed_until=observed_until,
+                        if zh:
+                            blank_streak = 0
+                            dialogue_streak = min(8, dialogue_streak + 1)
+                            if not translate_warmed:
+                                try:
+                                    warm_translate(job.engine_id)
+                                except Exception as exc:
+                                    logger.warning("deferred translate warm failed: %s", exc)
+                                translate_warmed = True
+                        else:
+                            blank_streak += 1
+                            dialogue_streak = max(0, dialogue_streak - 1)
+                        if zh and zh == last_zh:
+                            # Same dialogue — fill nearby unfinished ticks cheaply
+                            fill_to = stride_ticks + (1 if dialogue_streak >= 2 else 0)
+                            for s in range(tick + 1, min(n_ticks, tick + fill_to)):
+                                if s not in done:
+                                    done.add(s)
+                                    slot_text[s] = zh
+                                    slot_conf[s] = conf
+                        last_zh = zh
+
+                        job.current_time = t
+                        covered = max((s for s in done), default=0) * base_tick
+                        job.progress = min(1.0, covered / duration) if duration > 0 else 1.0
+
+                        cue_serial = self._emit_merged_runs(
+                            job,
+                            writer,
+                            slot_text,
+                            slot_conf,
+                            done,
+                            base_tick,
+                            duration,
+                            emitted_runs,
+                            cue_serial,
+                            dial_ctx,
+                            buffer,
                         )
-                        for rec in changed:
-                            self._publish_record(job, writer, rec)
 
-                    avg_ms = (sum(timings) / len(timings)) * 1000 if timings else 0
-                    self._emit(
-                        job,
-                        {
-                            "type": "progress",
-                            "progress": job.progress,
-                            "current_time": t,
-                            "duration": duration,
-                            "cue_count": job.cue_count,
-                            "playhead": playhead,
-                            "live_lag": round(job.live_lag, 2),
-                            "buffer_ahead": round(job.buffer_ahead, 2),
-                            "sample_interval": round(job.sample_interval, 2),
-                            "slot_ms": round(elapsed * 1000),
-                            "avg_slot_ms": round(avg_ms),
-                            "ticks_done": len(done),
-                            "ticks_total": n_ticks,
-                            "series_id": job.series_id,
-                            "region": job.region,
-                            "seek_boost": in_seek,
-                            "scheduler_mode": perf.mode(),
-                            "context_window_s": job.context_window_s,
-                            "live_mode": job.live_mode,
-                            "context_buffer": buffer.as_dict(),
-                        },
-                    )
+                        # Buffer ahead / lag relative to playhead
+                        ph_tick = max(0, int(playhead / base_tick))
+                        frontier = ph_tick - 1
+                        s = ph_tick
+                        while s < n_ticks and s in done:
+                            frontier = s
+                            s += 1
+                        frontier_t = frontier * base_tick if frontier >= 0 else playhead - 30
+                        job.live_lag = playhead - frontier_t
+                        job.buffer_ahead = max(0.0, frontier_t - playhead)
+                        if live_priming and job.buffer_ahead >= _LIVE_READY_BUFFER_S:
+                            live_priming = False
+                        observed_until = max(playhead, frontier_t, t)
 
-                    if job._seek_event.is_set():
-                        continue
+                        # Retroactive refine when scheduler allows (deferred on live path)
+                        if perf.should_run_refine() and job.cue_records:
+                            changed = refine_batch(
+                                job.cue_records,
+                                dial_ctx=dial_ctx,
+                                buffer=buffer,
+                                limit=1 if job.live_mode else (4 if perf.mode() == "refine" else 2),
+                                observed_until=observed_until,
+                            )
+                            for rec in changed:
+                                self._publish_record(job, writer, rec)
+
+                        avg_ms = (sum(timings) / len(timings)) * 1000 if timings else 0
+                        self._emit(
+                            job,
+                            {
+                                "type": "progress",
+                                "progress": job.progress,
+                                "current_time": t,
+                                "duration": duration,
+                                "cue_count": job.cue_count,
+                                "playhead": playhead,
+                                "live_lag": round(job.live_lag, 2),
+                                "buffer_ahead": round(job.buffer_ahead, 2),
+                                "sample_interval": round(job.sample_interval, 2),
+                                "slot_ms": round(elapsed * 1000),
+                                "avg_slot_ms": round(avg_ms),
+                                "ticks_done": len(done),
+                                "ticks_total": n_ticks,
+                                "series_id": job.series_id,
+                                "region": job.region,
+                                "seek_boost": in_seek,
+                                "scheduler_mode": perf.mode(),
+                                "context_window_s": job.context_window_s,
+                                "live_mode": job.live_mode,
+                                "context_buffer": buffer.as_dict(),
+                            },
+                        )
+
+                        if job._seek_event.is_set():
+                            continue
+
+            finally:
+                _shutdown_decode_pool()
 
             if job._cancel.is_set():
                 job.status = "cancelled"
@@ -1052,19 +1105,22 @@ class JobManager:
                         en = (
                             dial_ctx.translate(
                                 zh,
+                                # Live: bare Argos only (no block context → fewer repeats)
                                 upcoming=(
-                                    upcoming[:6]
+                                    []
                                     if job.live_mode
                                     else (upcoming[:12] or _upcoming_zh(slot_text, done, s1, limit=4))
                                 ),
-                                prior_override=prior[-12:] if job.live_mode else (prior[-24:] or None),
+                                prior_override=[] if job.live_mode else (prior[-24:] or None),
                                 compare_candidates=not job.live_mode,
                             )
-                            or zh
+                            or ""
                         )
+                        if not (en or "").strip():
+                            en = ""  # show ZH-only rather than echo Chinese as EN
                     except Exception as exc:
-                        logger.warning("translate failed, keeping ZH: %s", exc)
-                        en = zh
+                        logger.warning("translate failed, ZH-only cue: %s", exc)
+                        en = ""
                     record = CueRecord.new(
                         text_zh=zh,
                         start=timing.start,

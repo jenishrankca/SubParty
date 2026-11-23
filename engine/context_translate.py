@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from en_clean import clean_en, is_garbage_en
 from names import extract_zh_name_candidates, lock_names_in_en, remember_en_names
 from translate import translate_zh_to_en as _bare_translate
 
@@ -110,31 +111,34 @@ def pick_best_candidate(bare: str, contextual: str, *, zh: str) -> str:
     """
     Cue-aware semantic compare of bare vs contextual EN.
 
-    Hard rejects only clear neighbor-swallow / collapse; otherwise pick the
-    higher ``score_en_against_zh``. Callers that revise cues keep full revision
-    history on ``CueRecord`` — this function only chooses the EN string.
+    Prefer clean provisional (bare) when contextual is garbage / fails score.
+    Callers that revise cues keep full revision history on ``CueRecord``.
     """
-    bare = (bare or "").strip()
-    contextual = (contextual or "").strip()
-    if not contextual:
-        return bare
-    if not bare:
-        return contextual
-    if contextual == bare:
-        return bare
+    bare_c = clean_en(bare or "", zh=zh) or ""
+    contextual_c = clean_en(contextual or "", zh=zh, fallback=bare_c) or ""
+    if not contextual_c:
+        return bare_c
+    if not bare_c:
+        return contextual_c
+    if contextual_c == bare_c:
+        return bare_c
+
+    # Prefer clean provisional when contextual fails score / still garbage
+    if is_garbage_en(contextual_c, zh=zh) and not is_garbage_en(bare_c, zh=zh):
+        return bare_c
 
     # Hard reject: contextual swallowed neighboring dialogue
-    if len(contextual) > 2.8 * max(len(bare), 1) + 20:
-        return bare
-    if len(contextual) < 0.35 * max(len(bare), 1):
-        return bare
+    if len(contextual_c) > 2.8 * max(len(bare_c), 1) + 20:
+        return bare_c
+    if len(contextual_c) < 0.35 * max(len(bare_c), 1):
+        return bare_c
 
-    bare_score = score_en_against_zh(bare, zh=zh, bare_len=len(bare))
-    ctx_score = score_en_against_zh(contextual, zh=zh, bare_len=len(bare))
-    # Slight preference for contextual when scores tie (dialogue consistency)
-    if ctx_score >= bare_score - 0.05:
-        return contextual
-    return bare
+    bare_score = score_en_against_zh(bare_c, zh=zh, bare_len=len(bare_c))
+    ctx_score = score_en_against_zh(contextual_c, zh=zh, bare_len=len(bare_c))
+    # Prefer bare on near-ties when contextual looks inflated / repetitive
+    if ctx_score >= bare_score + 0.15:
+        return contextual_c
+    return bare_c
 
 
 @dataclass
@@ -168,7 +172,30 @@ class DialogueContext:
         def _tr(text: str) -> str:
             return _bare_translate(text, self.engine_id)
 
-        bare = _tr(masked)
+        bare_raw = _tr(masked)
+        bare = clean_en(bare_raw, zh=zh) or ""
+
+        # Live / fast path: bare only — Argos block context produces repeats/nonsense
+        if not compare_candidates:
+            en = bare
+            if en and mapping:
+                if self.glossary:
+                    en = self.glossary.restore_placeholders(en, mapping)
+                else:
+                    en = _restore(en, mapping)
+            if en:
+                preferred = dict(self.glossary.terms) if self.glossary else {}
+                preferred.update(self._zh_to_en_names)
+                en = lock_names_in_en(en, preferred=preferred, prior_en_names=list(self._en_names))
+                en = self._stabilize_pronouns(zh, en)
+                en = clean_en(en, zh=zh, fallback=bare) or ""
+            if prior_override is None:
+                self.prior_zh.append(zh)
+                self.prior_en.append(en)
+                while len(self.prior_zh) > self.window:
+                    self.prior_zh.popleft()
+                    self.prior_en.popleft()
+            return (en or "").strip()
 
         prior = (
             list(prior_override)
@@ -197,10 +224,7 @@ class DialogueContext:
             except Exception as exc:
                 logger.debug("context translate failed: %s", exc)
 
-        if compare_candidates:
-            en = pick_best_candidate(bare, contextual, zh=zh)
-        else:
-            en = contextual or bare
+        en = pick_best_candidate(bare, contextual, zh=zh)
 
         if mapping:
             if self.glossary:
@@ -212,6 +236,7 @@ class DialogueContext:
         preferred.update(self._zh_to_en_names)
         en = lock_names_in_en(en, preferred=preferred, prior_en_names=list(self._en_names))
         en = self._stabilize_pronouns(zh, en)
+        en = clean_en(en, zh=zh, fallback=bare) or ""
 
         self._maybe_learn(zh, en)
         for n in remember_en_names(en):
