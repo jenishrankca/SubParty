@@ -62,6 +62,7 @@ class JobState:
     context_window_s: float = _DEFAULT_CONTEXT_WINDOW_S
     high_accuracy: bool = True
     cue_records: list[CueRecord] = field(default_factory=list, repr=False)
+    discard_on_cancel: bool = False
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _pause: threading.Event = field(default_factory=threading.Event, repr=False)
     _playhead_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -182,12 +183,22 @@ class JobManager:
             return list(self._jobs.values())
 
     def _persist(self, job: JobState) -> None:
+        if job.discard_on_cancel:
+            return
         try:
             from job_store import save_job_snapshot
 
             save_job_snapshot(job)
         except Exception:
             logger.exception("persist failed")
+
+    def _discard_snapshot(self, job: JobState) -> None:
+        try:
+            from job_store import delete_snapshot
+
+            delete_snapshot(job.video_path, job.id)
+        except Exception:
+            logger.exception("discard snapshot failed")
 
     def get(self, job_id: str) -> JobState | None:
         return self._jobs.get(job_id)
@@ -203,13 +214,29 @@ class JobManager:
                 job._seek_event.set()
         return True
 
-    def cancel(self, job_id: str) -> bool:
+    def cancel(self, job_id: str, *, discard: bool = True) -> bool:
         job = self._jobs.get(job_id)
         if not job:
             return False
+        if discard:
+            job.discard_on_cancel = True
+            self._discard_snapshot(job)
+        terminal = job.status in {"done", "error", "cancelled"}
+        # Unstick pause loop so cancel is noticed immediately
+        job.paused = False
         job._cancel.set()
         job._seek_event.set()
+        if terminal:
+            # Worker already finished — finalize here
+            job.status = "cancelled"
+            if not discard:
+                self._persist(job)
+            self._emit(job, {"type": "status", "status": "cancelled", "progress": job.progress})
         return True
+
+    def remove(self, job_id: str) -> bool:
+        """Cancel if active and always discard recovery snapshot."""
+        return self.cancel(job_id, discard=True)
 
     def subscribe(self, job_id: str, cb: EventCallback) -> None:
         with self._lock:
@@ -535,7 +562,10 @@ class JobManager:
 
             if job._cancel.is_set():
                 job.status = "cancelled"
-                self._persist(job)
+                if job.discard_on_cancel:
+                    self._discard_snapshot(job)
+                else:
+                    self._persist(job)
                 self._emit(job, {"type": "status", "status": "cancelled", "progress": job.progress})
                 return
 

@@ -252,6 +252,8 @@ export function App() {
   }
 
   function resetJobState() {
+    esRef.current?.close();
+    esRef.current = null;
     setSrtPath(null);
     setCues([]);
     setCueCount(0);
@@ -267,6 +269,81 @@ export function App() {
     setRegionLabel(null);
     setGlossaryCount(null);
     setEditCue(null);
+    setBatchNote(null);
+    setError(null);
+  }
+
+  async function refreshRecovery() {
+    try {
+      const rec = await apiGet<{ jobs: Array<Record<string, unknown>> }>("/recovery");
+      setRecovery(rec.jobs || []);
+    } catch {
+      /* offline */
+    }
+  }
+
+  async function cancelOrRemoveJob() {
+    if (!jobId) {
+      resetJobState();
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await apiSend(`/jobs/${jobId}/remove`, "POST");
+    } catch (err) {
+      // Fallback for older sidecars
+      try {
+        await apiSend(`/jobs/${jobId}/cancel`, "POST", { discard: true });
+      } catch (err2) {
+        setError(formatApiError(err2 instanceof Error ? err2 : err));
+        setBusy(false);
+        return;
+      }
+    }
+    resetJobState();
+    await refreshRecovery();
+    setBusy(false);
+  }
+
+  async function discardRecovery(snap: Record<string, unknown>) {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiSend<{ jobs?: Array<Record<string, unknown>> }>("/recovery/discard", "POST", {
+        job_id: snap.id,
+        snapshot_path: snap._snapshot_path,
+        video_path: snap.video_path,
+      });
+      if (jobId && String(snap.id) === jobId) {
+        resetJobState();
+      }
+      setRecovery(res.jobs || []);
+      if (!res.jobs) await refreshRecovery();
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function discardAllRecovery() {
+    if (!recovery.length) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiSend<{ jobs?: Array<Record<string, unknown>> }>("/recovery/discard-all", "POST");
+      const activeRecovering = jobId && recovery.some((r) => String(r.id) === jobId);
+      if (activeRecovering || status === "running" || status === "paused") {
+        resetJobState();
+      }
+      setRecovery(res.jobs || []);
+      if (!res.jobs) await refreshRecovery();
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function startProcess() {
@@ -560,6 +637,19 @@ export function App() {
               Resume
             </button>
           ) : null}
+          {jobId || status === "running" || status === "paused" || status === "queued" ? (
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void cancelOrRemoveJob()}
+              disabled={busy}
+              title="Stop processing and remove this job (also deletes recovery snapshot)"
+            >
+              {status === "running" || status === "paused" || status === "queued"
+                ? "Cancel job"
+                : "Remove job"}
+            </button>
+          ) : null}
           <button type="button" className="secondary" onClick={() => void exportAll()} disabled={!jobId}>
             Export
           </button>
@@ -654,10 +744,12 @@ export function App() {
                         : status === "paused"
                           ? "Paused at playhead."
                           : status === "done"
-                            ? "Done. Use Export for bilingual SRT / VTT / ASS."
-                            : status === "error"
-                              ? "Fix the issue above, then Process again."
-                              : "Pick a video, then Process."}
+                            ? "Done. Use Export for bilingual SRT / VTT / ASS — or Remove job to clear."
+                            : status === "cancelled"
+                              ? "Job cancelled. Process again when ready."
+                              : status === "error"
+                                ? "Fix the issue above, then Process again — or Remove job to clear."
+                                : "Pick a video, then Process. Cancel job stops work and clears recovery."}
                 </span>
               </div>
 
@@ -724,7 +816,18 @@ export function App() {
 
               {recovery.length ? (
                 <>
-                  <h2>Recover</h2>
+                  <h2>
+                    Unfinished jobs
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => void discardAllRecovery()}
+                      disabled={busy}
+                      title="Discard all recovery snapshots"
+                    >
+                      Discard all
+                    </button>
+                  </h2>
                   <ul className="cue-list">
                     {recovery.slice(0, 8).map((r) => (
                       <li key={String(r.id)}>
@@ -733,7 +836,16 @@ export function App() {
                         </div>
                         <div className="en">{String(r.video_path)}</div>
                         <button type="button" className="linkish" onClick={() => void resumeRecovery(r)}>
-                          Resume job
+                          Resume
+                        </button>
+                        <button
+                          type="button"
+                          className="linkish"
+                          onClick={() => void discardRecovery(r)}
+                          disabled={busy}
+                          style={{ marginLeft: "0.75rem", color: "var(--danger)" }}
+                        >
+                          Discard
                         </button>
                       </li>
                     ))}

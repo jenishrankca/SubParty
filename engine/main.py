@@ -19,7 +19,13 @@ from engines import list_engines, set_active_engine
 from exports import export_job_formats
 from ffmpeg_util import ffmpeg_path, ffprobe_path
 from glossary import glossary_for_video, invalidate_glossary_cache, load_glossary, series_id_from_video
-from job_store import list_recoverable_jobs, snapshot_path_for
+from job_store import (
+    delete_snapshot,
+    delete_snapshot_file,
+    discard_all_snapshots,
+    list_recoverable_jobs,
+    snapshot_path_for,
+)
 from models_mgr import ensure_model, list_models
 from paths import app_data_dir
 from pipeline import jobs
@@ -120,6 +126,18 @@ class RecoverRequest(BaseModel):
     video_path: str | None = None
     job_id: str | None = None
     engine_id: str = "argos"
+
+
+class CancelRequest(BaseModel):
+    """discard=True (default) also deletes the recovery snapshot."""
+
+    discard: bool = True
+
+
+class DiscardRecoveryRequest(BaseModel):
+    job_id: str | None = None
+    snapshot_path: str | None = None
+    video_path: str | None = None
 
 
 class JobResponse(BaseModel):
@@ -268,10 +286,26 @@ def resume_job(job_id: str) -> dict[str, Any]:
 
 
 @app.post("/jobs/{job_id}/cancel")
-def cancel_job(job_id: str) -> dict[str, Any]:
-    if not jobs.cancel(job_id):
+def cancel_job(job_id: str, body: CancelRequest | None = None) -> dict[str, Any]:
+    discard = True if body is None else bool(body.discard)
+    if not jobs.cancel(job_id, discard=discard):
         raise HTTPException(status_code=404, detail="Job not found")
-    return {"ok": True}
+    job = jobs.get(job_id)
+    return {
+        "ok": True,
+        "status": "cancelled",
+        "discarded": discard,
+        "job_id": job_id,
+        "video_path": job.video_path if job else None,
+    }
+
+
+@app.post("/jobs/{job_id}/remove")
+def remove_job(job_id: str) -> dict[str, Any]:
+    """Stop processing if active, discard recovery snapshot, mark cancelled."""
+    if not jobs.remove(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"ok": True, "status": "cancelled", "discarded": True, "job_id": job_id}
 
 
 @app.patch("/jobs/{job_id}/cues")
@@ -370,6 +404,36 @@ def data_info() -> dict[str, Any]:
         "models_dir": str(app_data_dir() / "models"),
         "note": "SRT still writes beside the video; glossary/recovery/models stay under data/.",
     }
+
+
+@app.post("/recovery/discard")
+def recovery_discard(body: DiscardRecoveryRequest) -> dict[str, Any]:
+    """Drop one unfinished recovery snapshot without resuming."""
+    removed = False
+    if body.snapshot_path:
+        removed = delete_snapshot_file(body.snapshot_path) or removed
+    jid = (body.job_id or "").strip()
+    if jid:
+        delete_snapshot(body.video_path, jid)
+        removed = True
+        # If that job is still in memory, cancel+discard it too
+        if jobs.get(jid):
+            jobs.cancel(jid, discard=True)
+    if not body.snapshot_path and not jid:
+        raise HTTPException(status_code=400, detail="job_id or snapshot_path required")
+    return {"ok": True, "removed": removed, "jobs": list_recoverable_jobs()}
+
+
+@app.post("/recovery/discard-all")
+def recovery_discard_all() -> dict[str, Any]:
+    """Discard every unfinished recovery snapshot and cancel matching in-memory jobs."""
+    pending = list_recoverable_jobs()
+    for snap in pending:
+        jid = str(snap.get("id") or "")
+        if jid and jobs.get(jid):
+            jobs.cancel(jid, discard=True)
+    n = discard_all_snapshots()
+    return {"ok": True, "removed": n, "jobs": list_recoverable_jobs()}
 
 
 @app.post("/recovery/resume")

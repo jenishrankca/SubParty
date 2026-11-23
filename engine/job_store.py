@@ -73,7 +73,7 @@ def list_recoverable_jobs(search_roots: list[str | Path] | None = None) -> list[
 
     for path in sorted(_jobs_dir().glob("*.json")):
         data = load_job_snapshot(path)
-        if not data or data.get("status") in {"done"}:
+        if not data or data.get("status") in {"done", "cancelled"}:
             continue
         jid = str(data.get("id") or path.stem)
         seen_ids.add(jid)
@@ -91,7 +91,7 @@ def list_recoverable_jobs(search_roots: list[str | Path] | None = None) -> list[
             matches = []
         for path in matches:
             data = load_job_snapshot(path)
-            if not data or data.get("status") in {"done"}:
+            if not data or data.get("status") in {"done", "cancelled"}:
                 continue
             jid = str(data.get("id") or path.stem)
             if jid in seen_ids:
@@ -115,14 +115,42 @@ def list_recoverable_jobs(search_roots: list[str | Path] | None = None) -> list[
     return found
 
 
-def delete_snapshot(video_path: str, job_id: str) -> None:
+def delete_snapshot(video_path: str | None, job_id: str) -> None:
     path = _jobs_dir() / f"{job_id}.json"
     if path.exists():
         path.unlink()
     # Also clear legacy copy if present (best-effort)
+    if video_path:
+        try:
+            legacy = legacy_beside_video_dir(video_path) / "jobs" / f"{job_id}.json"
+            if legacy.exists():
+                legacy.unlink()
+        except Exception:
+            pass
+
+
+def delete_snapshot_file(snapshot_path: str | Path) -> bool:
+    path = Path(snapshot_path)
+    if not path.exists():
+        return False
     try:
-        legacy = legacy_beside_video_dir(video_path) / "jobs" / f"{job_id}.json"
-        if legacy.exists():
-            legacy.unlink()
-    except Exception:
-        pass
+        path.unlink()
+        return True
+    except Exception as exc:
+        logger.warning("delete snapshot file failed %s: %s", path, exc)
+        return False
+
+
+def discard_all_snapshots() -> int:
+    """Remove every unfinished recovery snapshot from app-local jobs dir."""
+    removed = 0
+    for path in list(_jobs_dir().glob("*.json")):
+        data = load_job_snapshot(path)
+        if data and data.get("status") in {"done"}:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except Exception as exc:
+            logger.warning("discard_all failed %s: %s", path, exc)
+    return removed
