@@ -19,3 +19,5 @@ samples/*
 _refs/
 .vscode/
 .idea/
+.subparty/
+**/.subparty/

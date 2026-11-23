@@ -10,10 +10,27 @@ const isDev = !app.isPackaged;
 
 let mainWindow = null;
 let engineProc = null;
+let engineToken = "";
 
 function projectRoot() {
-  // app/ is one level under SubParty when running from source
   return path.resolve(__dirname, "..", "..");
+}
+
+function tokenPath() {
+  return path.join(projectRoot(), ".subparty", "engine.token");
+}
+
+function readToken() {
+  try {
+    const p = tokenPath();
+    if (fs.existsSync(p)) {
+      engineToken = fs.readFileSync(p, "utf8").trim();
+      return engineToken;
+    }
+  } catch (err) {
+    console.error("[engine] token read failed", err);
+  }
+  return "";
 }
 
 function resolvePython() {
@@ -27,9 +44,21 @@ function startEngine() {
   const py = resolvePython();
   const engineDir = path.join(projectRoot(), "engine");
   const mainPy = path.join(engineDir, "main.py");
+  // Ensure token exists before spawn so middleware and UI share it
+  const tp = tokenPath();
+  fs.mkdirSync(path.dirname(tp), { recursive: true });
+  if (!fs.existsSync(tp) || !fs.readFileSync(tp, "utf8").trim()) {
+    const crypto = require("crypto");
+    fs.writeFileSync(tp, crypto.randomBytes(32).toString("base64url"), "utf8");
+  }
+  engineToken = readToken();
   engineProc = spawn(py, [mainPy], {
     cwd: engineDir,
-    env: { ...process.env, PYTHONUTF8: "1" },
+    env: {
+      ...process.env,
+      PYTHONUTF8: "1",
+      SUBPARTY_ENGINE_TOKEN: engineToken,
+    },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -47,8 +76,10 @@ function waitForEngine(timeoutMs = 60000) {
     const tick = () => {
       const req = http.get(`${ENGINE_URL}/health`, (res) => {
         res.resume();
-        if (res.statusCode === 200) resolve(true);
-        else retry();
+        if (res.statusCode === 200) {
+          readToken();
+          resolve(true);
+        } else retry();
       });
       req.on("error", retry);
       function retry() {
@@ -65,17 +96,18 @@ function waitForEngine(timeoutMs = 60000) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 780,
-    minWidth: 900,
-    minHeight: 600,
+    width: 1280,
+    height: 860,
+    minWidth: 960,
+    minHeight: 640,
     backgroundColor: "#0f1419",
     title: "SubParty",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false, // allow file:// video playback
+      sandbox: true,
+      webSecurity: false,
     },
   });
 
@@ -115,29 +147,39 @@ ipcMain.handle("pick-video", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Pick a video with Chinese hardsubs",
     properties: ["openFile"],
-    filters: [
-      { name: "Video", extensions: ["mp4", "mkv", "ts", "webm", "avi", "mov"] },
-    ],
+    filters: [{ name: "Video", extensions: ["mp4", "mkv", "ts", "webm", "avi", "mov"] }],
   });
   if (result.canceled || !result.filePaths[0]) return null;
   return result.filePaths[0];
 });
 
+ipcMain.handle("pick-videos", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Batch: pick videos with Chinese hardsubs",
+    properties: ["openFile", "multiSelections"],
+    filters: [{ name: "Video", extensions: ["mp4", "mkv", "ts", "webm", "avi", "mov"] }],
+  });
+  if (result.canceled || !result.filePaths.length) return [];
+  return result.filePaths;
+});
+
 ipcMain.handle("open-folder", async (_e, targetPath) => {
   if (!targetPath) return;
-  const dir = fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory()
-    ? targetPath
-    : path.dirname(targetPath);
+  const dir =
+    fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory()
+      ? targetPath
+      : path.dirname(targetPath);
   await shell.openPath(dir);
 });
 
 ipcMain.handle("engine-url", async () => ENGINE_URL);
+ipcMain.handle("engine-token", async () => {
+  if (!engineToken) readToken();
+  return engineToken;
+});
 
 ipcMain.handle("path-to-file-url", async (_e, filePath) => {
   const normalized = path.resolve(filePath).replace(/\\/g, "/");
-  // Windows drive letter
-  if (/^[A-Za-z]:/.test(normalized)) {
-    return `file:///${normalized}`;
-  }
+  if (/^[A-Za-z]:/.test(normalized)) return `file:///${normalized}`;
   return `file://${normalized}`;
 });

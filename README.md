@@ -83,7 +83,13 @@ Sample hardsub clip: `samples\demo_zh_hardsub.mp4`.
 c:\Users\jenis\App\SubParty\scripts\run-engine-tests.cmd
 ```
 
-Covers SRT overlap replacement, adaptive tick picking, region matrix (top/mid/bottom × 480/720/1080), OCR confidence helpers, and a short synth hardsub e2e (plus `samples\demo_zh_hardsub.mp4` when present).
+Covers SRT overlap replacement, adaptive tick picking, region matrix (top/mid/bottom × 480/720/1080), OCR confidence helpers, exports/engines, and a short synth hardsub e2e (plus `samples\demo_zh_hardsub.mp4` when present).
+
+## Phases 2–4 (on `main`)
+
+- **Translation:** engine picker (Argos / NLLB / Qwen stub), glossary tab, stronger dialogue context + name locking
+- **Studio:** timeline editor, pause/resume, Export → bilingual SRT + VTT + ASS
+- **Desktop:** batch pick, job recovery, models tab, token-secured engine IPC, [docs/PORTABLE.md](docs/PORTABLE.md)
 
 ## Portable notes
 

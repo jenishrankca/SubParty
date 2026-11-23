@@ -1,17 +1,11 @@
 /// <reference types="vite/client" />
 
-interface SubPartyCue {
-  index: number;
-  start: number;
-  end: number;
-  text_zh: string;
-  text_en: string;
-}
-
 interface SubPartyApi {
   pickVideo: () => Promise<string | null>;
+  pickVideos: () => Promise<string[]>;
   openFolder: (targetPath: string) => Promise<void>;
   engineUrl: () => Promise<string>;
+  engineToken: () => Promise<string>;
   pathToFileUrl: (filePath: string) => Promise<string>;
 }
 
