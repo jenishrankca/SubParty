@@ -43,8 +43,10 @@ def list_models() -> list[dict[str, Any]]:
             "kind": "translate",
             "installed": argos_installed,
             "engine": "argos",
+            "required": True,
             "size_hint": "~100 MB",
-            "notes": "Default engine. Auto-downloads language pack on first use.",
+            "notes": "Default Live engine. Auto-downloads language pack on first use.",
+            "first_run": "Ensure once so Live Process can translate without waiting mid-stream.",
         }
     )
 
@@ -63,8 +65,10 @@ def list_models() -> list[dict[str, Any]]:
             "kind": "ocr",
             "installed": ocr_ok,
             "engine": "ocr",
+            "required": True,
             "size_hint": "~50 MB",
             "notes": "ONNX DirectML when available.",
+            "first_run": "Required for hardsub OCR. Warm once from Models before first Process.",
         }
     )
 
@@ -178,3 +182,86 @@ def ensure_model(model_id: str) -> dict[str, Any]:
 
         return ensure_whisper_model()
     raise ValueError(f"Unknown model: {model_id}")
+
+
+def setup_checklist() -> dict[str, Any]:
+    """First-run / setup clarity for UI (required vs optional models + Live/Quality)."""
+    from pathlib import Path
+
+    from ffmpeg_util import ffmpeg_path, ffprobe_path
+
+    models = list_models()
+    ffmpeg_ok = False
+    ffprobe_ok = False
+    try:
+        ffmpeg_ok = Path(ffmpeg_path()).exists()
+    except Exception:
+        ffmpeg_ok = False
+    try:
+        ffprobe_ok = Path(ffprobe_path()).exists()
+    except Exception:
+        ffprobe_ok = False
+
+    required = [m for m in models if m.get("required") or not m.get("optional")]
+    optional = [m for m in models if m.get("optional")]
+    missing_required = [m["id"] for m in required if not m.get("installed")]
+    missing_optional = [m["id"] for m in optional if not m.get("installed")]
+
+    steps: list[dict[str, Any]] = [
+        {
+            "id": "ffmpeg",
+            "label": "FFmpeg + ffprobe",
+            "ok": bool(ffmpeg_ok and ffprobe_ok),
+            "required": True,
+            "hint": "Bundled under tools/ or PATH",
+        },
+    ]
+    for m in required:
+        steps.append(
+            {
+                "id": m["id"],
+                "label": m["name"],
+                "ok": bool(m.get("installed")),
+                "required": True,
+                "hint": m.get("first_run") or m.get("notes") or "",
+                "kind": m.get("kind"),
+            }
+        )
+    for m in optional:
+        steps.append(
+            {
+                "id": m["id"],
+                "label": m["name"],
+                "ok": bool(m.get("installed")),
+                "required": False,
+                "hint": m.get("notes") or "",
+                "kind": m.get("kind"),
+            }
+        )
+
+    ready = not missing_required and ffmpeg_ok and ffprobe_ok
+    return {
+        "ready": ready,
+        "first_run": not ready,
+        "missing_required": missing_required,
+        "missing_optional": missing_optional,
+        "steps": steps,
+        "models_dir": str(models_dir()),
+        "live_vs_quality": {
+            "live": {
+                "label": "Live",
+                "summary": "Keep-up watch while you play. Argos, provisional cues, playhead-ahead OCR. Audio verify off.",
+                "buffer_ahead_s": 2.5,
+            },
+            "quality": {
+                "label": "Quality",
+                "summary": "Offline heavy pass. Fine timing probes, optional ASR verify, deeper buffer before Ready.",
+                "audio_verify": "optional (Verify checkbox)",
+            },
+        },
+        "next_action": (
+            "Open Models and Ensure missing required packs"
+            if missing_required
+            else ("Install FFmpeg" if not (ffmpeg_ok and ffprobe_ok) else "Ready — pick Live or Quality and Process")
+        ),
+    }

@@ -49,10 +49,16 @@ from job_store import (
     list_recoverable_jobs,
     snapshot_path_for,
 )
-from models_mgr import ensure_model, list_models
+from models_mgr import ensure_model, list_models, setup_checklist
 from audio_verify import audio_verify_status
 from paths import app_data_dir
 from pipeline import jobs
+from region import (
+    SubtitleRegion,
+    clear_confirmed_region,
+    confirm_region,
+    get_confirmed_region,
+)
 from security import get_or_create_token, token_ok
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -72,7 +78,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_OPEN_PATHS = {"/health", "/auth/token-check", "/docs", "/openapi.json", "/redoc"}
+_OPEN_PATHS = {"/health", "/setup", "/auth/token-check", "/docs", "/openapi.json", "/redoc"}
 
 
 @app.middleware("http")
@@ -190,6 +196,18 @@ class ModelEnsureRequest(BaseModel):
     model_id: str
 
 
+class RegionConfirmRequest(BaseModel):
+    video_path: str = Field(..., min_length=1)
+    x: float = Field(0.06, ge=0.0, le=1.0)
+    y: float = Field(0.75, ge=0.0, le=1.0)
+    w: float = Field(0.88, ge=0.05, le=1.0)
+    h: float = Field(0.22, ge=0.05, le=1.0)
+
+
+class RegionClearRequest(BaseModel):
+    video_path: str | None = None
+
+
 class RecoverRequest(BaseModel):
     snapshot_path: str | None = None
     video_path: str | None = None
@@ -274,7 +292,14 @@ def health() -> dict[str, Any]:
         ],
         "timing_fine_step_s": 0.1,
         "audio_verify": audio_verify_status(),
+        "setup": setup_checklist(),
     }
+
+
+@app.get("/setup")
+def setup() -> dict[str, Any]:
+    """First-run model/setup checklist (open path for boot banner)."""
+    return setup_checklist()
 
 
 @app.get("/auth/bootstrap")
@@ -767,7 +792,7 @@ def delete_glossary_term(body: GlossaryDeleteRequest) -> dict[str, Any]:
 
 @app.get("/models")
 def models() -> dict[str, Any]:
-    return {"models": list_models()}
+    return {"models": list_models(), "setup": setup_checklist()}
 
 
 @app.post("/models/ensure")
@@ -776,7 +801,37 @@ def models_ensure(body: ModelEnsureRequest) -> dict[str, Any]:
         info = ensure_model(body.model_id)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "model": info}
+    return {"ok": True, "model": info, "setup": setup_checklist()}
+
+
+@app.get("/region")
+def region_get(video_path: str) -> dict[str, Any]:
+    conf = get_confirmed_region(video_path)
+    return {
+        "ok": True,
+        "video_path": video_path,
+        "confirmed": conf.as_dict() if conf else None,
+    }
+
+
+@app.post("/region/confirm")
+def region_confirm(body: RegionConfirmRequest) -> dict[str, Any]:
+    if not Path(body.video_path).is_file():
+        raise HTTPException(status_code=404, detail="Video not found")
+    conf = confirm_region(
+        body.video_path,
+        SubtitleRegion(x=body.x, y=body.y, w=body.w, h=body.h),
+        source="user",
+        confidence=1.0,
+        evidence={"hook": "POST /region/confirm"},
+    )
+    return {"ok": True, "confirmed": conf.as_dict()}
+
+
+@app.post("/region/clear")
+def region_clear(body: RegionClearRequest) -> dict[str, Any]:
+    clear_confirmed_region(body.video_path)
+    return {"ok": True, "cleared": body.video_path or "all"}
 
 
 @app.get("/recovery")

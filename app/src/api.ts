@@ -23,6 +23,13 @@ export interface Cue {
     notes?: string;
     disagreement?: boolean;
   };
+  visual_start?: number | null;
+  visual_end?: number | null;
+  speech_start?: number | null;
+  speech_end?: number | null;
+  timing_source?: string;
+  inferred?: boolean;
+  reconcile_note?: string;
   revisions?: Array<{
     revision_id?: string;
     text_en?: string;
@@ -33,6 +40,27 @@ export interface Cue {
     provisional?: boolean;
     approved?: boolean;
   }>;
+}
+
+export interface SetupChecklist {
+  ready?: boolean;
+  first_run?: boolean;
+  missing_required?: string[];
+  missing_optional?: string[];
+  next_action?: string;
+  models_dir?: string;
+  steps?: Array<{
+    id: string;
+    label: string;
+    ok: boolean;
+    required: boolean;
+    hint?: string;
+    kind?: string;
+  }>;
+  live_vs_quality?: {
+    live?: { label?: string; summary?: string };
+    quality?: { label?: string; summary?: string; audio_verify?: string };
+  };
 }
 
 export interface AudioVerifyStatus {

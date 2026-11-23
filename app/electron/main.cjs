@@ -1,10 +1,13 @@
 const { app, BrowserWindow, dialog, ipcMain, shell, protocol, net } = require("electron");
 const path = require("path");
-const { spawn, execSync } = require("child_process");
+const { spawn, exec, execFile } = require("child_process");
 const http = require("http");
 const fs = require("fs");
 const { pathToFileURL } = require("url");
 const crypto = require("crypto");
+const { promisify } = require("util");
+
+const execAsync = promisify(exec);
 
 const ENGINE_PORT = 18765;
 const ENGINE_URL = `http://127.0.0.1:${ENGINE_PORT}`;
@@ -81,32 +84,36 @@ function resolvePython() {
   return process.env.SUBPARTY_PYTHON || "python";
 }
 
-function listeningPids() {
+async function listeningPids() {
   const pids = new Set();
   if (process.platform !== "win32") return pids;
   try {
-    const out = execSync(`netstat -ano | findstr :${ENGINE_PORT}`, {
+    const { stdout } = await execAsync(`netstat -ano | findstr :${ENGINE_PORT}`, {
       encoding: "utf8",
       windowsHide: true,
     });
-    for (const line of out.split(/\r?\n/)) {
+    for (const line of String(stdout || "").split(/\r?\n/)) {
       if (!/LISTENING/i.test(line)) continue;
       const parts = line.trim().split(/\s+/);
       const pid = parts[parts.length - 1];
       if (pid && /^\d+$/.test(pid) && pid !== "0") pids.add(Number(pid));
     }
   } catch {
-    /* none */
+    /* none listening or findstr exit 1 */
   }
   return pids;
 }
 
-function freeEnginePort({ allowPid = null } = {}) {
-  const pids = listeningPids();
+async function freeEnginePort({ allowPid = null } = {}) {
+  const pids = await listeningPids();
   for (const pid of pids) {
     if (allowPid && pid === allowPid) continue;
     try {
-      execSync(`taskkill /PID ${pid} /F`, { windowsHide: true, stdio: "ignore" });
+      await execFile(
+        "taskkill",
+        ["/PID", String(pid), "/F"],
+        { windowsHide: true }
+      );
       console.log(`[engine] killed pid ${pid} on :${ENGINE_PORT}`);
     } catch {
       /* ignore */
@@ -114,27 +121,30 @@ function freeEnginePort({ allowPid = null } = {}) {
   }
 }
 
-function sleepSync(ms) {
-  const sab = new Int32Array(new SharedArrayBuffer(4));
-  Atomics.wait(sab, 0, 0, ms);
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function waitPortFree(timeoutMs = 5000) {
+async function waitPortFree(timeoutMs = 5000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (listeningPids().size === 0) return true;
-    sleepSync(200);
+    const pids = await listeningPids();
+    if (pids.size === 0) return true;
+    await sleep(200);
   }
-  return listeningPids().size === 0;
+  const left = await listeningPids();
+  return left.size === 0;
 }
 
-function stopEngineProcess() {
+async function stopEngineProcess() {
   const proc = engineProc;
   engineProc = null;
   if (!proc) return;
   try {
     if (process.platform === "win32" && proc.pid) {
-      execSync(`taskkill /PID ${proc.pid} /T /F`, { windowsHide: true, stdio: "ignore" });
+      await execFile("taskkill", ["/PID", String(proc.pid), "/T", "/F"], {
+        windowsHide: true,
+      });
     } else {
       proc.kill();
     }
@@ -143,13 +153,13 @@ function stopEngineProcess() {
   }
 }
 
-function startEngine() {
+async function startEngine() {
   if (engineProc || engineStarting) return;
   engineStarting = true;
   try {
     // Clear strangers on the port before spawn — never kill after we own the child
-    freeEnginePort();
-    waitPortFree(4000);
+    await freeEnginePort();
+    await waitPortFree(4000);
     const py = resolvePython();
     const engineDir = path.join(projectRoot(), "engine");
     const mainPy = path.join(engineDir, "main.py");
@@ -178,13 +188,13 @@ function startEngine() {
   }
 }
 
-function restartEngine() {
+async function restartEngine() {
   const previous = engineProc;
-  stopEngineProcess();
+  await stopEngineProcess();
   // Only reclaim strangers — our child was already taskkilled
-  freeEnginePort({ allowPid: previous && previous.pid ? previous.pid : null });
-  waitPortFree(4000);
-  startEngine();
+  await freeEnginePort({ allowPid: previous && previous.pid ? previous.pid : null });
+  await waitPortFree(4000);
+  await startEngine();
 }
 
 function httpGetJson(urlPath, timeoutMs = 2500) {
@@ -258,7 +268,7 @@ async function waitForEngine(timeoutMs = 90000) {
         }
         if (ver.startsWith("0.")) {
           console.error(`[engine] outdated ${ver} on port — restarting our sidecar`);
-          restartEngine();
+          await restartEngine();
         } else {
           ensureToken();
           console.log(`[engine] ready version=${ver || "unknown"}`);
@@ -269,10 +279,10 @@ async function waitForEngine(timeoutMs = 90000) {
       if (attempt === 1 || attempt % 10 === 0) {
         console.log(`[engine] waiting… (${err && err.message ? err.message : err})`);
       }
-      // If our child died, respawn
-      if (!engineProc && !engineStarting) startEngine();
+      // If our child died, respawn (async — do not block event loop)
+      if (!engineProc && !engineStarting) await startEngine();
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await sleep(500);
   }
   throw new Error("Engine did not become ready in time");
 }
@@ -323,7 +333,7 @@ function registerMediaProtocol() {
 
 app.whenReady().then(async () => {
   registerMediaProtocol();
-  startEngine();
+  await startEngine();
   try {
     await waitForEngine();
   } catch (err) {
@@ -333,7 +343,7 @@ app.whenReady().then(async () => {
   // Keep trying in background if startup timed out
   if (!(await healthOk())) {
     setInterval(() => {
-      if (!engineProc && !engineStarting) startEngine();
+      if (!engineProc && !engineStarting) void startEngine();
     }, 4000);
   }
 });
@@ -350,12 +360,13 @@ async function healthOk() {
 }
 
 app.on("window-all-closed", () => {
-  stopEngineProcess();
-  if (process.platform !== "darwin") app.quit();
+  void stopEngineProcess().finally(() => {
+    if (process.platform !== "darwin") app.quit();
+  });
 });
 
 app.on("before-quit", () => {
-  stopEngineProcess();
+  void stopEngineProcess();
 });
 
 ipcMain.handle("pick-video", async () => {
@@ -412,8 +423,8 @@ ipcMain.handle("engine-health", async () => {
 });
 
 ipcMain.handle("engine-restart", async () => {
-  restartEngine();
   try {
+    await restartEngine();
     await waitForEngine(60000);
     return { ok: true };
   } catch (err) {
@@ -436,7 +447,7 @@ ipcMain.handle("engine-fetch", async (_e, pathName, init = {}) => {
   try {
     // Ensure engine is alive for mutating calls
     if (!(await healthOk()) && (method === "POST" || method === "PATCH" || method === "DELETE")) {
-      if (!engineProc) startEngine();
+      if (!engineProc) await startEngine();
       await waitForEngine(30000);
     }
     const result = await httpJson(method, pathName, method === "GET" || method === "HEAD" ? undefined : bodyObj, token);

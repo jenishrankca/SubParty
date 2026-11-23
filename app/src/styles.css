@@ -181,6 +181,68 @@ button.danger:hover:not(:disabled) {
   background: var(--bg2);
 }
 
+.setup-banner,
+.mode-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 0.55rem 1rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.82rem;
+}
+
+.setup-banner {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg1));
+}
+
+.setup-banner ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+}
+
+.setup-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.mode-banner {
+  background: var(--bg1);
+  color: var(--muted);
+}
+
+.mode-banner strong {
+  color: var(--text);
+  margin-right: 0.35rem;
+}
+
+.mode-banner em {
+  font-style: normal;
+  color: var(--accent);
+  margin-left: auto;
+}
+
+.setup-checklist {
+  margin-bottom: 0.85rem;
+}
+
+.maturity-pill.maturity-inferred {
+  border-color: color-mix(in srgb, #c9a227 50%, var(--line));
+  color: #c9a227;
+}
+
+.maturity-pill.maturity-disagree {
+  border-color: color-mix(in srgb, var(--danger, #c44) 50%, var(--line));
+  color: var(--danger, #c44);
+}
+
+.bounds-grid {
+  margin-top: 0.35rem;
+}
+
 .main {
   display: grid;
   grid-template-columns: 1.6fr 0.9fr;

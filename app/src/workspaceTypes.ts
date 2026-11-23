@@ -45,5 +45,19 @@ export interface Cue {
     notes?: string;
     disagreement?: boolean;
   };
+  visual_start?: number | null;
+  visual_end?: number | null;
+  speech_start?: number | null;
+  speech_end?: number | null;
+  timing_source?: string;
+  inferred?: boolean;
+  reconcile_note?: string;
   revisions?: CueRevisionView[];
+}
+
+export type ReviewReason = "uncertain" | "audio" | "inferred" | "missing-en";
+
+export interface ReviewQueueItem {
+  cue: Cue;
+  reasons: ReviewReason[];
 }

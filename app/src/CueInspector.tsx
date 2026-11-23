@@ -18,6 +18,11 @@ function pct(n: number | undefined): string {
   return `${Math.round(n * 100)}%`;
 }
 
+function fmtSec(n: number | null | undefined): string {
+  if (typeof n !== "number" || Number.isNaN(n)) return "—";
+  return n.toFixed(2);
+}
+
 export function CueInspector({
   cue,
   bilingual,
@@ -41,6 +46,8 @@ export function CueInspector({
   const rev = latestRevisionPair(cue);
   const ocr = cue.original_ocr || cue.text_zh;
   const asr = cue.audio_transcript || "";
+  const visualStart = cue.visual_start ?? cue.start;
+  const visualEnd = cue.visual_end ?? cue.end;
 
   return (
     <div className="inspector">
@@ -49,6 +56,10 @@ export function CueInspector({
         <span className={`maturity-pill maturity-${cue.maturity || (cue.provisional ? "provisional" : "unknown")}`}>
           {cue.maturity || (cue.provisional ? "provisional" : "—")}
         </span>
+        {cue.inferred ? <span className="maturity-pill maturity-inferred">inferred</span> : null}
+        {cue.audio_disagreement ? (
+          <span className="maturity-pill maturity-disagree">audio disagree</span>
+        ) : null}
       </div>
 
       <div className="inspector-meta">
@@ -87,17 +98,39 @@ export function CueInspector({
               <p>{cue.reconciled_zh}</p>
             </div>
           ) : null}
-          {cue.audio_evidence?.notes ? (
+          {cue.audio_evidence?.notes || cue.reconcile_note ? (
             <div>
               <span>Compare</span>
               <p>
-                {cue.audio_evidence.notes}
-                {typeof cue.audio_evidence.char_similarity === "number"
+                {cue.audio_evidence?.notes || cue.reconcile_note}
+                {typeof cue.audio_evidence?.char_similarity === "number"
                   ? ` · sim ${Math.round(cue.audio_evidence.char_similarity * 100)}%`
                   : ""}
               </p>
             </div>
           ) : null}
+        </div>
+      </section>
+
+      <section>
+        <h3>Bounds</h3>
+        <div className="evidence-grid bounds-grid">
+          <div>
+            <span>Visual (OCR display)</span>
+            <p>
+              {fmtSec(visualStart)} – {fmtSec(visualEnd)}
+            </p>
+          </div>
+          <div>
+            <span>Speech (ASR)</span>
+            <p>
+              {fmtSec(cue.speech_start)} – {fmtSec(cue.speech_end)}
+            </p>
+          </div>
+          <div>
+            <span>Timing source</span>
+            <p>{cue.timing_source || "visual"}</p>
+          </div>
         </div>
       </section>
 

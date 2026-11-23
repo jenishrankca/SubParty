@@ -30,6 +30,8 @@ Enable later with `SUBPARTY_DEEPSEEK_OCR=1`. **Never** every-frame.
 `region.ConfirmableRegion` + `confirm_region` / `clear_confirmed_region` / `get_confirmed_region`.  
 SSE `region` events include `region_confirmable` for UI confirm hooks.
 
+**UI (stage 7):** `POST /region/confirm` · `POST /region/clear` · Job panel Confirm/Clear on detected crop.
+
 ## OCR p50 (weird-games, 10 pre-extracted crops, OCR-only)
 
 | Backend | p50 | nonempty |

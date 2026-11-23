@@ -15,10 +15,11 @@ import {
   type Cue,
   type EngineInfo,
   type GlossaryData,
+  type SetupChecklist,
 } from "./api";
 import { CueInspector } from "./CueInspector";
 import { TimelineRail } from "./TimelineRail";
-import { computeQualitySummary, processingStages } from "./workspaceStats";
+import { buildReviewQueue, computeQualitySummary, processingStages } from "./workspaceStats";
 
 type JobStatus = "idle" | "queued" | "running" | "paused" | "done" | "error" | "cancelled";
 
@@ -29,9 +30,19 @@ interface ModelInfo {
   installed: boolean;
   engine?: string;
   optional?: boolean;
+  required?: boolean;
   size_hint?: string;
   notes?: string;
+  first_run?: string;
   path?: string;
+}
+
+interface RegionConfirmable {
+  region: { x: number; y: number; w: number; h: number };
+  source?: string;
+  confidence?: number;
+  confirmed?: boolean;
+  evidence?: Record<string, unknown>;
 }
 
 function formatTime(sec: number): string {
@@ -177,8 +188,18 @@ export function App() {
   const [bilingual, setBilingual] = useState(true);
   const [seriesId, setSeriesId] = useState<string | null>(null);
   const [regionLabel, setRegionLabel] = useState<string | null>(null);
+  const [regionConfirmable, setRegionConfirmable] = useState<RegionConfirmable | null>(null);
+  const [regionBusy, setRegionBusy] = useState(false);
   const [glossaryCount, setGlossaryCount] = useState<number | null>(null);
   const [reviewOpen, setReviewOpen] = useState(true);
+  const [setup, setSetup] = useState<SetupChecklist | null>(null);
+  const [setupDismissed, setSetupDismissed] = useState(() => {
+    try {
+      return sessionStorage.getItem("subparty.setup.dismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
   const [engines, setEngines] = useState<EngineInfo[]>([]);
   const [engineId, setEngineId] = useState("argos");
   const [watchMode, setWatchMode] = useState<WatchMode>("live");
@@ -380,32 +401,69 @@ export function App() {
   const overlayEn = (activeCue?.text_en || "").trim();
   const showOverlay = Boolean(activeCue && (overlayEn || overlayZh));
 
-  const uncertainCues = useMemo(
-    () => cues.filter((c) => c.uncertain || (typeof c.confidence === "number" && c.confidence < 0.78)),
-    [cues]
-  );
-
-  const audioDisagreements = useMemo(
-    () => cues.filter((c) => c.audio_disagreement),
-    [cues]
-  );
+  const reviewQueue = useMemo(() => buildReviewQueue(cues), [cues]);
 
   async function refreshMeta() {
     try {
       const eng = await apiGet<{ engines: EngineInfo[] }>("/engines");
       setEngines(eng.engines || []);
-      const mods = await apiGet<{ models: ModelInfo[] }>("/models");
+      const mods = await apiGet<{ models: ModelInfo[]; setup?: SetupChecklist }>("/models");
       setModels(mods.models || []);
+      if (mods.setup) setSetup(mods.setup);
       const rec = await apiGet<{ jobs: Array<Record<string, unknown>> }>("/recovery");
       setRecovery(rec.jobs || []);
-      const health = await apiGet<{ audio_verify?: AudioVerifyStatus }>("/health");
+      const health = await apiGet<{ audio_verify?: AudioVerifyStatus; setup?: SetupChecklist }>("/health");
       if (health.audio_verify) setAudioReady(health.audio_verify);
+      if (health.setup) setSetup(health.setup);
       const series = await apiGet<{ series: Array<{ series_id: string; term_count: number; path: string }> }>(
         "/glossary/series"
       );
       setSeriesList(series.series || []);
     } catch {
-      /* auth may not be ready yet */
+      /* auth may not be ready yet — try open /setup */
+      try {
+        const s = await apiGet<SetupChecklist>("/setup");
+        setSetup(s);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  async function confirmRegionCrop() {
+    if (!videoPath || !regionConfirmable?.region) return;
+    setRegionBusy(true);
+    try {
+      const r = regionConfirmable.region;
+      await apiSend("/region/confirm", "POST", {
+        video_path: videoPath,
+        x: r.x,
+        y: r.y,
+        w: r.w,
+        h: r.h,
+      });
+      setRegionConfirmable({ ...regionConfirmable, confirmed: true, source: "user" });
+      setRegionLabel(
+        `confirmed y ${(r.y * 100).toFixed(0)}–${((r.y + r.h) * 100).toFixed(0)}%`
+      );
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setRegionBusy(false);
+    }
+  }
+
+  async function clearRegionCrop() {
+    if (!videoPath) return;
+    setRegionBusy(true);
+    try {
+      await apiSend("/region/clear", "POST", { video_path: videoPath });
+      setRegionConfirmable(null);
+      setRegionLabel(null);
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setRegionBusy(false);
     }
   }
 
@@ -802,9 +860,29 @@ export function App() {
         } else if (type === "region") {
           if (typeof data.series_id === "string") setSeriesId(data.series_id);
           if (typeof data.glossary_terms === "number") setGlossaryCount(data.glossary_terms);
-          const region = data.region as { y?: number; h?: number } | undefined;
-          if (region && typeof region.y === "number" && typeof region.h === "number") {
+          const region = data.region as { x?: number; y?: number; w?: number; h?: number } | undefined;
+          const confirmable = data.region_confirmable as RegionConfirmable | undefined;
+          if (confirmable?.region) {
+            setRegionConfirmable(confirmable);
+            const r = confirmable.region;
+            setRegionLabel(
+              `${confirmable.confirmed ? "confirmed " : "auto "}y ${(r.y * 100).toFixed(0)}–${(
+                (r.y + r.h) *
+                100
+              ).toFixed(0)}%`
+            );
+          } else if (region && typeof region.y === "number" && typeof region.h === "number") {
             setRegionLabel(`y ${(region.y * 100).toFixed(0)}–${((region.y + region.h) * 100).toFixed(0)}%`);
+            if (
+              typeof region.x === "number" &&
+              typeof region.w === "number"
+            ) {
+              setRegionConfirmable({
+                region: { x: region.x, y: region.y, w: region.w, h: region.h },
+                source: "auto",
+                confirmed: false,
+              });
+            }
           }
         } else if (type === "progress") {
           setProgress(Number(data.progress ?? 0));
@@ -1054,16 +1132,20 @@ export function App() {
           <div className="tool-group" data-label="Mode">
             <select
               value={watchMode}
-              onChange={(e) => setWatchMode(e.target.value as WatchMode)}
-              title="Live = keep-up watch (default). Quality = offline heavy pipeline."
+              onChange={(e) => {
+                const next = e.target.value as WatchMode;
+                setWatchMode(next);
+                if (next === "live") setAudioVerify(false);
+              }}
+              title="Live = keep-up while watching. Quality = offline heavy pass + optional ASR verify."
               disabled={busy || status === "running" || status === "paused" || status === "queued"}
             >
-              <option value="live">Live</option>
-              <option value="quality">Quality</option>
+              <option value="live">Live (watch)</option>
+              <option value="quality">Quality (offline)</option>
             </select>
             <label
               className="audio-toggle"
-              title="EOF Chinese ASR vs OCR — Quality mode only; off Live path"
+              title="EOF Chinese ASR vs OCR — Quality only; never on Live path"
             >
               <input
                 type="checkbox"
@@ -1132,6 +1214,56 @@ export function App() {
         </div>
       </header>
 
+      {setup && setup.first_run && !setupDismissed ? (
+        <div className="setup-banner" role="status">
+          <div>
+            <strong>First-run setup</strong>
+            <span>{setup.next_action || "Ensure required models before Process."}</span>
+            <ul>
+              {(setup.steps || [])
+                .filter((s) => s.required && !s.ok)
+                .slice(0, 4)
+                .map((s) => (
+                  <li key={s.id}>{s.label}</li>
+                ))}
+            </ul>
+          </div>
+          <div className="setup-actions">
+            <button type="button" onClick={() => setPanel("models")}>
+              Open Models
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                setSetupDismissed(true);
+                try {
+                  sessionStorage.setItem("subparty.setup.dismissed", "1");
+                } catch {
+                  /* ignore */
+                }
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mode-banner" aria-live="polite">
+        <strong>{watchMode === "live" ? "Live" : "Quality"}</strong>
+        <span>
+          {watchMode === "live"
+            ? setup?.live_vs_quality?.live?.summary ||
+              "Keep-up watch: Argos, provisional cues, playhead-ahead OCR. Audio verify stays off."
+            : setup?.live_vs_quality?.quality?.summary ||
+              "Offline heavy pass: fine timing, optional ASR verify, deeper Ready buffer."}
+        </span>
+        {watchMode === "quality" && audioVerify ? (
+          <em>ASR verify on · EOF pass after OCR</em>
+        ) : null}
+      </div>
+
       <div className="stage-strip" aria-label="Processing stages">
         {stages.map((s) => (
           <div key={s.id} className={`stage${s.active ? " active" : ""}${s.done ? " done" : ""}`}>
@@ -1151,6 +1283,7 @@ export function App() {
         <span>{quality.missingEn} missing EN</span>
         <span>{quality.overlaps} overlaps</span>
         <span>{quality.audioDisagreements} audio disagree</span>
+        <span>{reviewQueue.length} review</span>
         <span>{quality.provisional} provisional</span>
         {Object.entries(quality.maturity).map(([k, v]) => (
           <span key={k}>
@@ -1412,6 +1545,42 @@ export function App() {
                   </div>
                 ) : null}
                 <div>
+                  <span>Mode</span>
+                  <strong>{watchMode === "live" ? "Live watch" : "Quality offline"}</strong>
+                </div>
+                <div>
+                  <span>Crop</span>
+                  <strong>
+                    {regionLabel || "—"}
+                    {regionConfirmable && !regionConfirmable.confirmed && videoPath ? (
+                      <>
+                        {" "}
+                        <button
+                          type="button"
+                          className="linkish"
+                          disabled={regionBusy}
+                          onClick={() => void confirmRegionCrop()}
+                        >
+                          Confirm
+                        </button>
+                      </>
+                    ) : null}
+                    {regionConfirmable?.confirmed ? (
+                      <>
+                        {" "}
+                        <button
+                          type="button"
+                          className="linkish"
+                          disabled={regionBusy}
+                          onClick={() => void clearRegionCrop()}
+                        >
+                          Clear
+                        </button>
+                      </>
+                    ) : null}
+                  </strong>
+                </div>
+                <div>
                   <span>Audio</span>
                   <strong>
                     {audioVerify
@@ -1428,46 +1597,6 @@ export function App() {
                   </strong>
                 </div>
               </div>
-
-              {audioDisagreements.length ? (
-                <>
-                  <h2>
-                    Audio disagreements
-                    <span className="linkish" style={{ pointerEvents: "none" }}>
-                      {audioDisagreements.length}
-                    </span>
-                  </h2>
-                  <ul className="cue-list review">
-                    {audioDisagreements.slice(0, 40).map((c) => (
-                      <li key={`a-${c.cue_id || c.start}-${c.index}`} className="audio-disagree-item">
-                        <div className="t">
-                          #{c.index} · {formatTime(c.start)}–{formatTime(c.end)}
-                          {typeof c.audio_evidence?.char_similarity === "number"
-                            ? ` · sim ${Math.round(c.audio_evidence.char_similarity * 100)}%`
-                            : ""}
-                          <button
-                            type="button"
-                            className="linkish"
-                            onClick={() => {
-                              const v = videoRef.current;
-                              if (!v) return;
-                              v.currentTime = Math.max(0, c.start);
-                              setPlayTime(c.start);
-                            }}
-                          >
-                            Jump
-                          </button>
-                        </div>
-                        <div className="zh">OCR: {c.original_ocr || c.text_zh}</div>
-                        <div className="en">ASR: {c.audio_transcript || "—"}</div>
-                        {c.reconciled_zh && c.reconciled_zh !== (c.original_ocr || c.text_zh) ? (
-                          <div className="t">Reconciled: {c.reconciled_zh}</div>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              ) : null}
 
               {recovery.length ? (
                 <>
@@ -1514,23 +1643,49 @@ export function App() {
               ) : null}
 
               <h2>
-                Uncertain
+                Review queue
                 <button type="button" className="linkish" onClick={() => setReviewOpen((v) => !v)}>
-                  {uncertainCues.length} · {reviewOpen ? "hide" : "show"}
+                  {reviewQueue.length} · {reviewOpen ? "hide" : "show"}
                 </button>
               </h2>
               {reviewOpen ? (
-                uncertainCues.length === 0 ? (
+                reviewQueue.length === 0 ? (
                   <div className="empty" style={{ padding: "0.35rem 0" }}>
-                    No low-confidence cues.
+                    No uncertain, audio-disagree, inferred, or missing-EN cues.
                   </div>
                 ) : (
                   <ul className="cue-list review">
-                    {uncertainCues.slice(0, 30).map((c) => (
-                      <li key={`u-${c.start}-${c.index}`} className="uncertain-item">
+                    {reviewQueue.slice(0, 40).map(({ cue: c, reasons }) => (
+                      <li
+                        key={`rq-${c.cue_id || c.start}-${c.index}`}
+                        className={
+                          reasons.includes("audio")
+                            ? "audio-disagree-item"
+                            : reasons.includes("uncertain")
+                              ? "uncertain-item"
+                              : undefined
+                        }
+                      >
                         <div className="t">
                           #{c.index} · {formatTime(c.start)}–{formatTime(c.end)} ·{" "}
-                          {typeof c.confidence === "number" ? `${Math.round(c.confidence * 100)}%` : "?"}
+                          {reasons.join(" · ")}
+                          {typeof c.confidence === "number"
+                            ? ` · ${Math.round(c.confidence * 100)}%`
+                            : ""}
+                          <button
+                            type="button"
+                            className="linkish"
+                            onClick={() => {
+                              const v = videoRef.current;
+                              if (!v) return;
+                              v.currentTime = Math.max(0, c.start);
+                              setPlayTime(c.start);
+                              setEditCue({ ...c });
+                              setPanel("inspect");
+                            }}
+                          >
+                            Inspect
+                          </button>
                           <button
                             type="button"
                             className="linkish"
@@ -1544,8 +1699,14 @@ export function App() {
                             Jump
                           </button>
                         </div>
-                        <div className="en">{c.text_en}</div>
-                        <div className="zh">{c.text_zh}</div>
+                        <div className="en">{c.text_en || "—"}</div>
+                        <div className="zh">OCR: {c.original_ocr || c.text_zh}</div>
+                        {c.audio_transcript ? (
+                          <div className="en">ASR: {c.audio_transcript}</div>
+                        ) : null}
+                        {c.reconciled_zh && c.reconciled_zh !== (c.original_ocr || c.text_zh) ? (
+                          <div className="t">Reconciled: {c.reconciled_zh}</div>
+                        ) : null}
                       </li>
                     ))}
                   </ul>
@@ -2020,15 +2181,31 @@ export function App() {
 
           {panel === "models" ? (
             <>
-              <h2>Models</h2>
+              <h2>Models · first-run</h2>
               <p className="hint" style={{ opacity: 0.75, fontSize: "0.85rem", marginBottom: "0.75rem" }}>
-                Weights live under the SubParty <code>data/models</code> folder (not beside videos). After
-                install, pick the matching engine in the top bar. Only one of NLLB/Qwen stays loaded in RAM.
-                Disk: NLLB ~2.4&nbsp;GB · Qwen2.5-1.5B ~3.0&nbsp;GB · faster-whisper small ~500&nbsp;MB.
-                Audio ASR is optional evidence (never overwrites OCR). Install:{" "}
-                <code>pip install -r requirements-audio.txt</code>, then Ensure below, then enable{" "}
-                <strong>Audio verify</strong> on Process. SRT still saves next to the video.
+                Weights live under <code>data/models</code> (not beside videos).{" "}
+                <strong>Required</strong> for Live: Argos + OCR. Optional: NLLB / Qwen (Quality MT),
+                faster-whisper (Quality Verify). Only one of NLLB/Qwen stays loaded. SRT still saves next
+                to the video.
               </p>
+              {setup ? (
+                <div className="setup-checklist">
+                  <div className="en">
+                    {setup.ready ? "Setup ready" : "Setup incomplete"} · {setup.next_action}
+                  </div>
+                  <ul className="cue-list review">
+                    {(setup.steps || []).map((s) => (
+                      <li key={s.id}>
+                        <div className="t">
+                          {s.ok ? "✓" : "○"} {s.label}
+                          {s.required ? " · required" : " · optional"}
+                        </div>
+                        {s.hint ? <div className="zh">{s.hint}</div> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               {audioReady ? (
                 <p className="hint" style={{ opacity: 0.8, fontSize: "0.82rem", marginBottom: "0.75rem" }}>
                   Audio verify: {audioReady.ready ? "package ready" : "not installed"}
@@ -2040,14 +2217,14 @@ export function App() {
                   <li key={m.id}>
                     <div className="en">
                       {m.name} {m.installed ? "· installed" : "· missing"}
+                      {m.required || !m.optional ? " · required" : " · optional"}
                       {m.size_hint ? ` · ${m.size_hint}` : ""}
                     </div>
                     <div className="t">
                       {m.kind}
-                      {m.optional ? " · optional" : ""}
                       {m.engine && m.engine !== "ocr" ? ` · engine id: ${m.engine}` : ""}
                     </div>
-                    {m.notes ? <div className="zh">{m.notes}</div> : null}
+                    {m.first_run || m.notes ? <div className="zh">{m.first_run || m.notes}</div> : null}
                     <button
                       type="button"
                       className="linkish"

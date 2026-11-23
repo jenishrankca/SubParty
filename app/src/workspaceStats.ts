@@ -3,9 +3,9 @@
  * Does not invent confidence or progress — only aggregates what the engine already emitted.
  */
 
-import type { Cue, JobStatusLike } from "./workspaceTypes";
+import type { Cue, JobStatusLike, ReviewQueueItem, ReviewReason } from "./workspaceTypes";
 
-export type { Cue };
+export type { Cue, ReviewQueueItem, ReviewReason };
 
 export interface QualitySummary {
   cueCount: number;
@@ -109,6 +109,29 @@ export function processingStages(
     return stages.map((s) => ({ ...s, active: false }));
   }
   return stages;
+}
+
+/** Unified review queue: uncertain + audio disagreements + inferred + missing EN. */
+export function buildReviewQueue(cues: Cue[]): ReviewQueueItem[] {
+  const items: ReviewQueueItem[] = [];
+  for (const cue of cues) {
+    const reasons: ReviewReason[] = [];
+    if (cue.uncertain || (typeof cue.confidence === "number" && cue.confidence < 0.78)) {
+      reasons.push("uncertain");
+    }
+    if (cue.audio_disagreement) reasons.push("audio");
+    if (cue.inferred) reasons.push("inferred");
+    if (!(cue.text_en || "").trim() && (cue.text_zh || "").trim()) reasons.push("missing-en");
+    if (reasons.length) items.push({ cue, reasons });
+  }
+  const rank = (r: ReviewReason) =>
+    r === "audio" ? 0 : r === "inferred" ? 1 : r === "uncertain" ? 2 : 3;
+  return items.sort((a, b) => {
+    const ra = Math.min(...a.reasons.map(rank));
+    const rb = Math.min(...b.reasons.map(rank));
+    if (ra !== rb) return ra - rb;
+    return a.cue.start - b.cue.start;
+  });
 }
 
 export function latestRevisionPair(cue: Cue): { before?: string; after?: string; reason?: string } | null {
