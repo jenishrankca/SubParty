@@ -144,11 +144,44 @@ class JobManager:
         self._emit(job, {"type": "status", "status": "running", "progress": job.progress})
         return True
 
+    def _rewrite_srt(self, job: JobState) -> None:
+        from srt_writer import Cue, SrtWriter
+
+        writer = SrtWriter(Path(job.srt_path))
+        writer.rewrite_all(
+            [
+                Cue(
+                    index=int(c.get("index") or i),
+                    start=float(c["start"]),
+                    end=float(c["end"]),
+                    text_zh=str(c.get("text_zh") or ""),
+                    text_en=str(c.get("text_en") or ""),
+                    confidence=float(c.get("confidence") or 1.0),
+                    uncertain=bool(c.get("uncertain") or False),
+                )
+                for i, c in enumerate(job.cues, start=1)
+            ]
+        )
+
+    def replace_cues(self, job_id: str, cues: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        job.cues = list(cues)
+        job.cue_count = len(job.cues)
+        self._rewrite_srt(job)
+        self._persist(job)
+        self._emit(
+            job,
+            {"type": "cues_replaced", "cue_count": job.cue_count, "srt_path": job.srt_path},
+        )
+        return job.cues
+
     def update_cue(self, job_id: str, cue: dict[str, Any]) -> dict[str, Any] | None:
         job = self._jobs.get(job_id)
         if not job:
             return None
-        from srt_writer import Cue, SrtWriter, merge_cue_payloads
+        from srt_writer import merge_cue_payloads
 
         payload = {
             "index": int(cue.get("index") or 0),
@@ -159,23 +192,27 @@ class JobManager:
             "confidence": float(cue.get("confidence") or 1.0),
             "uncertain": bool(cue.get("uncertain") or False),
         }
+        # Preserve evidence fields when editing existing cue
+        for existing in job.cues:
+            if abs(float(existing.get("start") or 0) - payload["start"]) < 0.12 or (
+                cue.get("cue_id") and existing.get("cue_id") == cue.get("cue_id")
+            ):
+                for k in (
+                    "cue_id",
+                    "original_ocr",
+                    "audio_transcript",
+                    "reconciled_zh",
+                    "audio_disagreement",
+                    "maturity",
+                ):
+                    if k in existing and k not in cue:
+                        payload[k] = existing[k]
+                break
+        if cue.get("cue_id"):
+            payload["cue_id"] = cue["cue_id"]
         job.cues = merge_cue_payloads(job.cues, payload)
         job.cue_count = len(job.cues)
-        writer = SrtWriter(Path(job.srt_path))
-        writer.rewrite_all(
-            [
-                Cue(
-                    index=int(c["index"]),
-                    start=float(c["start"]),
-                    end=float(c["end"]),
-                    text_zh=str(c.get("text_zh") or ""),
-                    text_en=str(c.get("text_en") or ""),
-                    confidence=float(c.get("confidence") or 1.0),
-                    uncertain=bool(c.get("uncertain") or False),
-                )
-                for c in job.cues
-            ]
-        )
+        self._rewrite_srt(job)
         self._persist(job)
         matched = next(
             (c for c in job.cues if abs(float(c["start"]) - payload["start"]) < 1e-6),
@@ -183,6 +220,39 @@ class JobManager:
         )
         self._emit(job, {"type": "cue", "cue": matched, "cue_count": job.cue_count, "srt_path": job.srt_path})
         return matched
+
+    def split_cue(self, job_id: str, body: dict[str, Any]) -> list[dict[str, Any]] | None:
+        from cue_ops import split_cue
+
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        next_cues = split_cue(
+            list(job.cues),
+            cue_id=body.get("cue_id"),
+            start=body.get("start"),
+            at=body.get("at"),
+            left_zh=body.get("left_zh"),
+            right_zh=body.get("right_zh"),
+            left_en=body.get("left_en"),
+            right_en=body.get("right_en"),
+        )
+        return self.replace_cues(job_id, next_cues)
+
+    def merge_cues(self, job_id: str, body: dict[str, Any]) -> list[dict[str, Any]] | None:
+        from cue_ops import merge_cues
+
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        next_cues = merge_cues(
+            list(job.cues),
+            cue_id_a=body.get("cue_id_a"),
+            cue_id_b=body.get("cue_id_b"),
+            start_a=body.get("start_a"),
+            start_b=body.get("start_b"),
+        )
+        return self.replace_cues(job_id, next_cues)
 
     def list_jobs(self) -> list[JobState]:
         with self._lock:
@@ -197,6 +267,27 @@ class JobManager:
             save_job_snapshot(job)
         except Exception:
             logger.exception("persist failed")
+        # Keep durable batch manifest in sync
+        bid = getattr(job, "batch_id", None)
+        if bid:
+            try:
+                from batch_store import update_batch_job
+
+                update_batch_job(
+                    str(bid),
+                    job.id,
+                    status=job.status,
+                    progress=job.progress,
+                    cue_count=job.cue_count,
+                    srt_path=job.srt_path,
+                    error=job.error,
+                    video_path=job.video_path,
+                    audio_disagreements=(getattr(job, "audio_summary", None) or {}).get(
+                        "disagreements"
+                    ),
+                )
+            except Exception:
+                logger.exception("batch persist failed")
 
     def _discard_snapshot(self, job: JobState) -> None:
         try:
