@@ -19,8 +19,9 @@ from engines import list_engines, set_active_engine
 from exports import export_job_formats
 from ffmpeg_util import ffmpeg_path, ffprobe_path
 from glossary import glossary_for_video, invalidate_glossary_cache, load_glossary, series_id_from_video
-from job_store import list_recoverable_jobs
+from job_store import list_recoverable_jobs, snapshot_path_for
 from models_mgr import ensure_model, list_models
+from paths import app_data_dir
 from pipeline import jobs
 from security import get_or_create_token, token_ok
 
@@ -173,6 +174,7 @@ def health() -> dict[str, Any]:
         "mode": "accuracy-engine+provisional+refine+timing",
         "auth": True,
         "context_window_s_default": 120,
+        "data_dir": str(app_data_dir()),
     }
 
 
@@ -356,7 +358,18 @@ def models_ensure(body: ModelEnsureRequest) -> dict[str, Any]:
 @app.get("/recovery")
 def recovery(root: str | None = None) -> dict[str, Any]:
     roots = [root] if root else None
-    return {"jobs": list_recoverable_jobs(roots)}
+    return {"jobs": list_recoverable_jobs(roots), "data_dir": str(app_data_dir())}
+
+
+@app.get("/data/info")
+def data_info() -> dict[str, Any]:
+    return {
+        "data_dir": str(app_data_dir()),
+        "glossary_dir": str(app_data_dir() / "glossary"),
+        "jobs_dir": str(app_data_dir() / "jobs"),
+        "models_dir": str(app_data_dir() / "models"),
+        "note": "SRT still writes beside the video; glossary/recovery/models stay under data/.",
+    }
 
 
 @app.post("/recovery/resume")
@@ -367,7 +380,7 @@ def recovery_resume(body: RecoverRequest) -> JobResponse:
     if body.snapshot_path:
         data = load_job_snapshot(Path(body.snapshot_path))
     elif body.video_path and body.job_id:
-        snap = Path(body.video_path).parent / ".subparty" / "jobs" / f"{body.job_id}.json"
+        snap = snapshot_path_for(body.job_id, body.video_path)
         data = load_job_snapshot(snap)
     if not data:
         raise HTTPException(status_code=404, detail="Snapshot not found")

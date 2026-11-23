@@ -73,9 +73,21 @@ c:\Users\jenis\App\SubParty\scripts\start-engine.cmd
 4. `{videoname}.en.srt` grows beside the video for VLC / YouTube
 5. **Open folder** to reveal the SRT
 
-Series glossary lives at `{video_folder}/.subparty/{series_id}.json` (folder name = series). APIs: `GET /glossary?video_path=…`, `POST /glossary/term`.
+**App data** (glossary, recovery jobs, engine token, downloaded models) lives under `data\` in the SubParty folder — **not** beside videos. Old `{video_folder}/.subparty/` folders are migrated once when found, then ignored for new writes. **SRT still saves beside the video.**
+
+Series glossary: `data\glossary\{series_id}.json` (series id = parent folder name). APIs: `GET /glossary?video_path=…`, `POST /glossary/term`, `GET /data/info`.
 
 Sample hardsub clip: `samples\demo_zh_hardsub.mp4`.
+
+## Translation engines
+
+| Engine | Disk | Notes |
+|--------|------|--------|
+| **Argos** (default) | ~100 MB | Always available; auto pack download |
+| **NLLB-200 distilled 600M** | ~2.4 GB | Models tab → Download; then select in top bar |
+| **Qwen2.5 1.5B Instruct** | ~3.0 GB | Sized for 16GB RAM / 6GB VRAM (not 7B) |
+
+Optional ML deps: `engine\.venv\Scripts\pip install -r requirements-ml.txt`. Only one of NLLB/Qwen stays loaded in memory.
 
 ## Tests
 
@@ -94,7 +106,7 @@ Covers SRT overlap replacement, adaptive tick picking, region matrix (top/mid/bo
 - Benchmark: `engine/tests/test_benchmark_suite.py` + `fixtures/annotated_synth.json`
 - Local video via `subparty://` with `webSecurity: true` ([docs/PORTABLE.md](docs/PORTABLE.md))
 
-NLLB/Qwen remain **experimental** (not production-validated). Default engine: Argos + candidate compare.
+Default engine: Argos + candidate compare. NLLB/Qwen are optional local upgrades.
 
 ## Portable notes
 

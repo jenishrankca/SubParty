@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 from pathlib import Path
 
+from paths import legacy_token_path, token_path
+
 _TOKEN: str | None = None
-_TOKEN_FILE = Path(__file__).resolve().parents[1] / ".subparty" / "engine.token"
 
 
 def get_or_create_token() -> str:
@@ -18,16 +20,28 @@ def get_or_create_token() -> str:
     if env:
         _TOKEN = env
         return _TOKEN
-    _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if _TOKEN_FILE.exists():
-        raw = _TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if raw:
+
+    dest = token_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # Migrate from repo `.subparty/engine.token` once
+    legacy = legacy_token_path()
+    if not dest.exists() and legacy.exists():
+        try:
+            shutil.copy2(legacy, dest)
+        except Exception:
+            pass
+
+    if dest.exists():
+        raw = dest.read_text(encoding="utf-8").strip()
+        if raw and len(raw) >= 20 and raw != "test-fix-token":
             _TOKEN = raw
             return _TOKEN
+
     _TOKEN = secrets.token_urlsafe(32)
-    _TOKEN_FILE.write_text(_TOKEN, encoding="utf-8")
+    dest.write_text(_TOKEN, encoding="utf-8")
     try:
-        os.chmod(_TOKEN_FILE, 0o600)
+        os.chmod(dest, 0o600)
     except Exception:
         pass
     return _TOKEN

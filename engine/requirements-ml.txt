@@ -1,0 +1,10 @@
+# Optional ML translators (NLLB / Qwen). Install into the engine venv:
+#   .venv\Scripts\pip install -r requirements-ml.txt
+#
+# Uses the existing torch wheel if already present (CPU is fine on 16GB RAM).
+# For CUDA torch on NVIDIA, install a matching wheel from pytorch.org first.
+transformers>=4.44.0
+sentencepiece>=0.2.0
+huggingface_hub>=0.24.0
+accelerate>=0.33.0
+protobuf>=4.25.0

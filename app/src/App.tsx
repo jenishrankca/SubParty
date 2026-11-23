@@ -24,6 +24,9 @@ interface ModelInfo {
   installed: boolean;
   engine?: string;
   optional?: boolean;
+  size_hint?: string;
+  notes?: string;
+  path?: string;
 }
 
 function formatTime(sec: number): string {
@@ -788,6 +791,7 @@ export function App() {
                 </div>
                 <div>
                   File: <strong>{glossary?.path || "—"}</strong>
+                  <span style={{ opacity: 0.7 }}> · app data (not beside video)</span>
                 </div>
               </div>
               <div className="form-row">
@@ -901,19 +905,40 @@ export function App() {
           {panel === "models" ? (
             <>
               <h2>Models</h2>
+              <p className="hint" style={{ opacity: 0.75, fontSize: "0.85rem", marginBottom: "0.75rem" }}>
+                Weights live under the SubParty <code>data/models</code> folder (not beside videos). After
+                install, pick the matching engine in the top bar. Only one of NLLB/Qwen stays loaded in RAM.
+                Disk: NLLB ~2.4&nbsp;GB · Qwen2.5-1.5B ~3.0&nbsp;GB. SRT still saves next to the video.
+              </p>
               <ul className="cue-list">
                 {models.map((m) => (
                   <li key={m.id}>
                     <div className="en">
                       {m.name} {m.installed ? "· installed" : "· missing"}
+                      {m.size_hint ? ` · ${m.size_hint}` : ""}
                     </div>
                     <div className="t">
                       {m.kind}
                       {m.optional ? " · optional" : ""}
+                      {m.engine && m.engine !== "ocr" ? ` · engine id: ${m.engine}` : ""}
                     </div>
-                    {!m.installed ? (
-                      <button type="button" className="linkish" onClick={() => void ensureModel(m.id)}>
-                        Download / ensure
+                    {m.notes ? <div className="zh">{m.notes}</div> : null}
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => void ensureModel(m.id)}
+                      disabled={busy}
+                    >
+                      {m.installed ? "Re-check / warm" : "Download / ensure"}
+                    </button>
+                    {m.installed && m.engine && m.engine !== "ocr" ? (
+                      <button
+                        type="button"
+                        className="linkish"
+                        onClick={() => setEngineId(m.engine || "argos")}
+                        style={{ marginLeft: "0.75rem" }}
+                      >
+                        Use engine
                       </button>
                     ) : null}
                   </li>

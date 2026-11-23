@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 
-logger = logging.getLogger("subparty.glossary")
+from paths import glossary_dir, legacy_beside_video_dir
 
-_GLOSSARY_DIRNAME = ".subparty"
+logger = logging.getLogger("subparty.glossary")
 
 
 @dataclass
@@ -110,10 +111,26 @@ def series_id_from_video(video_path: str | Path) -> str:
     return safe[:80]
 
 
+def _migrate_legacy_glossary(sid: str, video_path: Path, dest: Path) -> None:
+    """One-shot copy from beside-video `.subparty/{sid}.json` if app-local is missing."""
+    if dest.exists():
+        return
+    legacy = legacy_beside_video_dir(video_path) / f"{sid}.json"
+    if not legacy.exists():
+        return
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy, dest)
+        logger.info("migrated glossary %s → %s", legacy, dest)
+    except Exception as exc:
+        logger.warning("glossary migrate skipped (%s): %s", legacy, exc)
+
+
 def load_glossary(video_path: str | Path) -> Glossary:
     p = Path(video_path)
     sid = series_id_from_video(p)
-    store = p.parent / _GLOSSARY_DIRNAME / f"{sid}.json"
+    store = glossary_dir() / f"{sid}.json"
+    _migrate_legacy_glossary(sid, p, store)
     terms: dict[str, str] = {}
     if store.exists():
         try:

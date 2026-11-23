@@ -32,7 +32,8 @@ or `cd app && npm run dev`.
 
 ## Secure local engine
 
-- Electron writes/reads `.subparty\engine.token` and passes `SUBPARTY_ENGINE_TOKEN` to the Python sidecar.
+- Electron writes/reads `data\engine.token` (migrates legacy `.subparty\engine.token`) and passes `SUBPARTY_ENGINE_TOKEN` to the Python sidecar.
+- Glossary / job recovery / HF models live under `data\` — never beside videos. SRT still beside the video.
 - API calls (except `/health`) require `Authorization: Bearer <token>` (SSE uses `?token=`).
 - Engine binds `127.0.0.1:18765` only.
 - **webSecurity:** enabled. Local video uses privileged `subparty://media/...` protocol (not `webSecurity: false`).
@@ -56,10 +57,11 @@ npx electron .
 
 Electron resolves `projectRoot()` two levels above `app/electron`, starts `engine\.venv\Scripts\python.exe engine\main.py`, and loads `app\dist\index.html` when not in Vite dev mode.
 
-For a friend-laptop zip: include `app\dist`, `app\electron`, `engine` (with `.venv`), `bin`, `scripts`, and root `.subparty` ignore patterns — **do not** ship your personal `engine.token`; a new token is minted on first run.
+For a friend-laptop zip: include `app\dist`, `app\electron`, `engine` (with `.venv`), `bin`, `scripts` — **do not** ship `data\engine.token` or `data\models`; a new token is minted on first run.
 
 ## Optional translators
 
 - **Argos** — default, auto-downloaded on first use.
-- **NLLB** — `pip install transformers torch sentencepiece` then select NLLB in the UI / Models tab.
-- **Qwen** — set `SUBPARTY_QWEN_MODEL` to a local model id/path (stub wired; not downloaded by default).
+- **NLLB-200 distilled 600M** (~2.4 GB) — `pip install -r requirements-ml.txt`, then Models tab → Download / ensure, then select **NLLB** in the top bar.
+- **Qwen2.5 1.5B Instruct** (~3.0 GB) — same flow; chosen over 7B so 16GB RAM / 6GB VRAM laptops do not OOM. Override path with `SUBPARTY_QWEN_MODEL` if needed.
+- Only one heavy model (NLLB or Qwen) stays loaded; switching unloads the other.

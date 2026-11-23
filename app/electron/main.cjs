@@ -34,6 +34,11 @@ function projectRoot() {
 }
 
 function tokenPath() {
+  // App-local data/ (not beside videos). Migrate from legacy repo .subparty/.
+  return path.join(projectRoot(), "data", "engine.token");
+}
+
+function legacyTokenPath() {
   return path.join(projectRoot(), ".subparty", "engine.token");
 }
 
@@ -45,6 +50,17 @@ function ensureToken() {
     if (fs.existsSync(tp)) raw = fs.readFileSync(tp, "utf8").trim();
   } catch {
     raw = "";
+  }
+  if (!raw) {
+    try {
+      const legacy = legacyTokenPath();
+      if (fs.existsSync(legacy)) {
+        raw = fs.readFileSync(legacy, "utf8").trim();
+        if (raw) fs.writeFileSync(tp, raw, "utf8");
+      }
+    } catch {
+      /* ignore */
+    }
   }
   // Reject leftover short/test tokens from debugging
   if (!raw || raw.length < 20 || raw === "test-fix-token") {
@@ -204,7 +220,7 @@ function httpJson(method, urlPath, bodyObj, token) {
           ...(body ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } : {}),
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        timeout: 120000,
+        timeout: 1_800_000, // model downloads can take a while
       },
       (res) => {
         let raw = "";

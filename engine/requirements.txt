@@ -7,6 +7,7 @@ opencv-python-headless>=4.10.0
 rapidocr>=3.0.0
 onnxruntime-directml>=1.17.0
 argostranslate>=1.9.0
+# Optional NLLB / Qwen: pip install -r requirements-ml.txt
 # Note: PaddleOCR was the plan default, but paddlepaddle 3.3 Windows CPU
 # hits a oneDNN/PIR crash here. RapidOCR uses the same PP-OCR Chinese models
 # via ONNXRuntime and is the portable v1 path. GPU Paddle can return later.
