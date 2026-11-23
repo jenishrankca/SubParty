@@ -1,19 +1,16 @@
 # SubParty roadmap (MVP)
 
-Canonical product: [subparty-mvp-spec.md](./subparty-mvp-spec.md) · Gap: [subparty-mvp-gap.md](./subparty-mvp-gap.md)
+Canonical: [subparty-mvp-spec.md](./subparty-mvp-spec.md) · Gap: [subparty-mvp-gap.md](./subparty-mvp-gap.md)
 
-## Current
+## Current (`main` @ `86e85d5`)
 
-Stages 1–5 Critical — first measurable closes on `main` (CER/ms/revision, OCR typo reconcile, speech-aligned timing). Harden with broader annotated suite next; stages 6–9 wait until Critical benches stay green.
+Critical 1–5 closed with measurable benches (CER/ms/revision/speech-align/word ts/ASR RTF/suite).  
+High 6–9 **first slices** landed: production editor, QA panel/API, glossary series+suggest, batch status panel.
 
-## Next (High — after Critical solid)
+## Next polish
 
-6 Professional editor · 7 Independent QA reports · 8 Glossary/series memory polish · 9 Batch production
+Deeper editor (split/merge), QA gold upload + exportable reports, character sheets, batch retry/export-all / durable queue.
 
 ## Later
 
 Live mode, more languages, optional reconstruction, advanced scene understanding
-
-## Earlier landed
-
-v1 OCR→SRT, phases 1–4 product surface, 2.0 accuracy engine, 2.1 maturity/timing, Phase B audio verify, MVP Critical metrics + speech align

@@ -1,7 +1,7 @@
 # SubParty MVP — Gap analysis (stages 1–9 vs `main`)
 
 **Date:** 2026-11-23 (updated)  
-**Baseline tip:** push after this pass  
+**Baseline tip:** `main` @ `86e85d5`  
 **Spec:** [subparty-mvp-spec.md](./subparty-mvp-spec.md) · **Roadmap:** [subparty-roadmap.md](./subparty-roadmap.md)
 
 **Method:** Evidence engines and measurable benches first; High stages as incremental product slices.
