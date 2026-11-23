@@ -19,7 +19,12 @@ from ocr import ocr_lines, warm_ocr
 from audio_verify import audio_verify_enabled, verify_cue_records, whisper_available
 from metrics import realtime_factor
 from refine import finalize_cues_at_eof, refine_batch
-from region import SubtitleRegion, detect_subtitle_region
+from region import (
+    ConfirmableRegion,
+    SubtitleRegion,
+    detect_subtitle_region_confirmable,
+    get_confirmed_region,
+)
 from revision import CueRecord
 from scheduler import PerformanceScheduler
 from srt_writer import Cue, SrtWriter, merge_cue_payloads
@@ -410,11 +415,23 @@ class JobManager:
             job.cue_records = []
             self._persist(job)
 
-            # Live: skip multi-frame region detect (cold-start cost); quality: auto-detect
-            if job.live_mode:
+            # Prefer user-confirmed crop; Live skips auto-detect; Quality uses confirmable auto
+            confirmed = get_confirmed_region(video)
+            region_meta: ConfirmableRegion | None = None
+            if confirmed and confirmed.confirmed:
+                region = confirmed.region
+                region_meta = confirmed
+            elif job.live_mode:
                 region = SubtitleRegion(
                     x=0.06, y=1.0 - band_ratio, w=0.88, h=band_ratio
                 ).clamp()
+                region_meta = ConfirmableRegion(
+                    region=region,
+                    source="default",
+                    confidence=0.35,
+                    confirmed=False,
+                    evidence={"live_mode": True, "needs_confirm": True},
+                )
             else:
                 try:
                     with job._playhead_lock:
@@ -425,14 +442,22 @@ class JobManager:
                         max(0.5, ph0 + 12),
                         max(0.5, min(duration - 1, ph0 + 30) if duration > 2 else ph0 + 2),
                     ]
-                    region = detect_subtitle_region(
+                    region_meta = detect_subtitle_region_confirmable(
                         video, sample_times=sample_t, duration=duration
                     )
+                    region = region_meta.region
                 except Exception as exc:
                     logger.warning("region detect failed: %s", exc)
                     region = SubtitleRegion(
                         x=0.06, y=1.0 - band_ratio, w=0.88, h=band_ratio
                     ).clamp()
+                    region_meta = ConfirmableRegion(
+                        region=region,
+                        source="default",
+                        confidence=0.3,
+                        confirmed=False,
+                        evidence={"error": str(exc)},
+                    )
             job.region = {
                 "x": region.x,
                 "y": region.y,
@@ -446,6 +471,7 @@ class JobManager:
                 {
                     "type": "region",
                     "region": job.region,
+                    "region_confirmable": region_meta.as_dict() if region_meta else None,
                     "series_id": job.series_id,
                     "glossary_terms": len(gloss.terms),
                     "live_mode": job.live_mode,

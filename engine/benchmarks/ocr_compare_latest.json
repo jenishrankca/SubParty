@@ -1,0 +1,107 @@
+{
+  "ok": true,
+  "stage": "3-ocr-region",
+  "created_utc": "20261123T072943Z",
+  "summary": {
+    "video": "samples\\the-weird-games-5min.mp4",
+    "stage1_baseline_ocr_p50_ms": 1679.0,
+    "rapidocr_legacy_p50_ms": 1727.7,
+    "ppocrv6_small_p50_ms": 1805.2,
+    "ppocrv5_mobile_p50_ms": 1200.8,
+    "default_backend": "ppocrv6_small",
+    "vs_baseline_ppocrv6": {
+      "baseline_ms": 1679.0,
+      "ppocrv6_ms": 1805.2,
+      "delta_ms": 126.2
+    },
+    "deepseek_uncertain": "stub only (SUBPARTY_DEEPSEEK_OCR); never every-frame",
+    "backends": [
+      {
+        "id": "ppocrv6_small",
+        "label": "PP-OCRv6 small (explicit)",
+        "default": true,
+        "note": "Det/Rec small ONNX via RapidOCR"
+      },
+      {
+        "id": "rapidocr",
+        "label": "RapidOCR legacy init",
+        "default": false,
+        "note": "Previous SubParty params (also PP-OCRv6 under the hood)"
+      },
+      {
+        "id": "ppocrv5_mobile",
+        "label": "PP-OCRv5 mobile",
+        "default": false,
+        "note": "Compare / rollback"
+      }
+    ]
+  },
+  "results": [
+    {
+      "backend": "rapidocr",
+      "warm_ms": 651.3,
+      "ocr": {
+        "n": 10,
+        "mean_ms": 1684.7,
+        "p50_ms": 1727.7,
+        "p95_ms": 1924.3,
+        "min_ms": 1341.9,
+        "max_ms": 1985.7
+      },
+      "nonempty": 5,
+      "previews": [
+        "十死无生的S级",
+        "小乖宝别怕哦",
+        "恐怖游戏里的下午茶",
+        "我还以为要我去打扫厕所呢",
+        "我吃"
+      ]
+    },
+    {
+      "backend": "ppocrv6_small",
+      "warm_ms": 10.7,
+      "ocr": {
+        "n": 10,
+        "mean_ms": 1754.8,
+        "p50_ms": 1805.2,
+        "p95_ms": 1951.9,
+        "min_ms": 1410.7,
+        "max_ms": 1964.9
+      },
+      "nonempty": 5,
+      "previews": [
+        "十死无生的S级",
+        "小乖宝别怕哦",
+        "恐怖游戏里的下午茶",
+        "我还以为要我去打扫厕所呢",
+        "我吃"
+      ]
+    },
+    {
+      "backend": "ppocrv5_mobile",
+      "warm_ms": 12.2,
+      "ocr": {
+        "n": 10,
+        "mean_ms": 1689.4,
+        "p50_ms": 1200.8,
+        "p95_ms": 3992.7,
+        "min_ms": 910.4,
+        "max_ms": 4396.6
+      },
+      "nonempty": 3,
+      "previews": [
+        "生的S级 G",
+        "小",
+        "我吃"
+      ]
+    }
+  ],
+  "live_remeasure_pyav": {
+    "note": "from measure_live_ready.py same session",
+    "ready_s": 6.81,
+    "seek_retarget_s": 2.75,
+    "seek2_retarget_s": 1.66,
+    "prior_ready_s_stage1": 8.67,
+    "prior_seek_s_pre_pyav_pass": 7.53
+  }
+}

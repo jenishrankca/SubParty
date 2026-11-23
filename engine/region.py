@@ -1,17 +1,27 @@
-"""Auto-detect subtitle region anywhere in frame (not bottom-only)."""
+"""Auto-detect subtitle region anywhere in frame (not bottom-only).
+
+Confirmable crop: auto-detect produces a ``ConfirmableRegion`` with confidence
+and evidence; a user-confirmed override sticks until cleared (hooks for UI).
+"""
 
 from __future__ import annotations
 
 import logging
 import tempfile
-from dataclasses import dataclass
+import threading
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ffmpeg_util import extract_full_frame, probe_size
 from ocr import ocr_lines
 from text_filters import is_junk_line
 
 logger = logging.getLogger("subparty.region")
+
+_CONFIRM_LOCK = threading.Lock()
+# video_path → user-confirmed region (sticky until clear)
+_USER_CONFIRMED: dict[str, "ConfirmableRegion"] = {}
 
 
 @dataclass
@@ -30,9 +40,89 @@ class SubtitleRegion:
         h = max(0.08, min(1.0 - y, self.h))
         return SubtitleRegion(x=x, y=y, w=w, h=h)
 
+    def as_dict(self) -> dict[str, float]:
+        return {"x": self.x, "y": self.y, "w": self.w, "h": self.h}
+
+
+@dataclass
+class ConfirmableRegion:
+    """Region plus provenance for UI confirm / reject / tweak."""
+
+    region: SubtitleRegion
+    source: str = "auto"  # auto | default | user
+    confidence: float = 0.5
+    confirmed: bool = False
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "region": self.region.as_dict(),
+            "source": self.source,
+            "confidence": round(float(self.confidence), 3),
+            "confirmed": bool(self.confirmed),
+            "evidence": dict(self.evidence or {}),
+        }
+
 
 def default_bottom_region() -> SubtitleRegion:
     return SubtitleRegion(x=0.06, y=0.78, w=0.88, h=0.20).clamp()
+
+
+def _video_key(video_path: Path | str) -> str:
+    try:
+        return str(Path(video_path).resolve())
+    except Exception:
+        return str(video_path)
+
+
+def confirm_region(
+    video_path: Path | str,
+    region: SubtitleRegion,
+    *,
+    source: str = "user",
+    confidence: float = 1.0,
+    evidence: dict[str, Any] | None = None,
+) -> ConfirmableRegion:
+    """Sticky user/UI confirmation — OCR crops should prefer this until cleared."""
+    conf = ConfirmableRegion(
+        region=region.clamp(),
+        source=source,
+        confidence=float(confidence),
+        confirmed=True,
+        evidence=dict(evidence or {"hook": "confirm_region"}),
+    )
+    with _CONFIRM_LOCK:
+        _USER_CONFIRMED[_video_key(video_path)] = conf
+    logger.info("region confirmed for %s: %s", Path(video_path).name, conf.region.as_dict())
+    return conf
+
+
+def clear_confirmed_region(video_path: Path | str | None = None) -> None:
+    with _CONFIRM_LOCK:
+        if video_path is None:
+            _USER_CONFIRMED.clear()
+        else:
+            _USER_CONFIRMED.pop(_video_key(video_path), None)
+
+
+def get_confirmed_region(video_path: Path | str) -> ConfirmableRegion | None:
+    with _CONFIRM_LOCK:
+        return _USER_CONFIRMED.get(_video_key(video_path))
+
+
+def resolve_region(
+    video_path: Path,
+    *,
+    sample_times: list[float] | None = None,
+    duration: float | None = None,
+) -> ConfirmableRegion:
+    """Prefer user-confirmed crop; else auto-detect with confidence."""
+    existing = get_confirmed_region(video_path)
+    if existing and existing.confirmed:
+        return existing
+    return detect_subtitle_region_confirmable(
+        video_path, sample_times=sample_times, duration=duration
+    )
 
 
 def detect_subtitle_region(
@@ -136,3 +226,41 @@ def detect_subtitle_region(
         height,
     )
     return region
+
+
+def detect_subtitle_region_confirmable(
+    video_path: Path,
+    *,
+    sample_times: list[float] | None = None,
+    duration: float | None = None,
+) -> ConfirmableRegion:
+    """Auto-detect wrapped with confidence + evidence for UI confirm hooks."""
+    # Count boxes via a thin probe — reuse detect then attach metadata
+    try:
+        width, height = probe_size(video_path)
+    except Exception:
+        width, height = 0, 0
+
+    region = detect_subtitle_region(
+        video_path, sample_times=sample_times, duration=duration
+    )
+    is_default = (
+        abs(region.y - 0.78) < 0.02
+        and abs(region.h - 0.20) < 0.03
+        and abs(region.x - 0.06) < 0.02
+    )
+    # Confidence: default band is weaker; auto with many samples is stronger
+    conf = 0.35 if is_default else 0.7
+    source = "default" if is_default else "auto"
+    return ConfirmableRegion(
+        region=region,
+        source=source,
+        confidence=conf,
+        confirmed=False,
+        evidence={
+            "frame_size": {"w": width, "h": height},
+            "sample_times": list(sample_times or []),
+            "needs_confirm": conf < 0.6,
+            "hook": "detect_subtitle_region_confirmable",
+        },
+    )
